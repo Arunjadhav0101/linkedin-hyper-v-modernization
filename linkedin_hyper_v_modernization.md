@@ -93,17 +93,17 @@ The existing deployment consists of two decoupled components communicating over 
 
 ```mermaid
 graph TD
-    User([User / Operator]) -->|HTTPS| WebApp[Next.js App & API Routes]
-    WebApp -->|Read / Write| DB[(PostgreSQL Database via Prisma)]
-    WebApp -->|Enqueue Jobs / IPC| Redis[(Redis Broker)]
+    User(["User / Operator"]) -->|HTTPS| WebApp["Next.js App & API Routes"]
+    WebApp -->|Read / Write| DB[("PostgreSQL Database via Prisma")]
+    WebApp -->|Enqueue Jobs / IPC| Redis[("Redis Broker")]
     
-    subgraph Legacy Worker Subsystem
-        Worker[Node.js Worker - JS]
+    subgraph Legacy_Worker ["Legacy Worker Subsystem"]
+        Worker["Node.js Worker (JavaScript)"]
         Worker -->|Consume Jobs| Redis
-        Worker -->|Scrape / API| LinkedIn[LinkedIn Voyager API / Browser]
+        Worker -->|Scrape / API| LinkedIn["LinkedIn Voyager API / Browser"]
         Worker -->|Direct DB Operations| DB
-        AntiBanLegacy[antiBan.js / rateLimit.js] -.-> Worker
-        ProxyLegacy[Ad-hoc Proxies] -.-> Worker
+        AntiBanLegacy["antiBan.js / rateLimit.js"] -.-> Worker
+        ProxyLegacy["Ad-hoc Proxies"] -.-> Worker
     end
 ```
 
@@ -117,38 +117,38 @@ The existing system exhibits several critical architectural, operational, and st
 
 ```mermaid
 flowchart TD
-    subgraph Frontend_Plane [1. Frontend Control Plane (TypeScript)]
-        NextApp[Next.js Dashboard & API] -->|Emits untyped / dynamic IPC payload| RedisQueue[(Redis Queue / IPC)]
+    subgraph Frontend_Plane ["1. Frontend Control Plane (TypeScript)"]
+        NextApp["Next.js Dashboard & API"] -->|Emits untyped / dynamic IPC payload| RedisQueue[("Redis Queue / IPC")]
     end
 
-    subgraph Worker_Failure [2. Language Asymmetry & Type Drift]
-        RedisQueue -->|Unvalidated raw payload| WorkerJS[Legacy Node.js Worker (JavaScript)]
-        WorkerJS -.->|Silent Runtime TypeError / Schema Drift| Crash[Worker Task Crash]
+    subgraph Worker_Failure ["2. Language Asymmetry & Type Drift"]
+        RedisQueue -->|Unvalidated raw payload| WorkerJS["Legacy Node.js Worker (JavaScript)"]
+        WorkerJS -.->|Silent Runtime TypeError / Schema Drift| Crash["Worker Task Crash"]
     end
 
-    subgraph AntiBan_Collision [3. Anti-Ban Race Conditions & Velocity Breaches]
-        W1[Worker Instance 1] -->|Reads local in-memory counter| LocalMem1[(Local Memory Counter)]
-        W2[Worker Instance 2] -->|Reads local in-memory counter| LocalMem2[(Local Memory Counter)]
-        W1 -->|Simultaneous Request for Account X| LinkedInAPI[LinkedIn Voyager API]
+    subgraph AntiBan_Collision ["3. Anti-Ban Race Conditions & Velocity Breaches"]
+        W1["Worker Instance 1"] -->|Reads local in-memory counter| LocalMem1[("Local Memory Counter")]
+        W2["Worker Instance 2"] -->|Reads local in-memory counter| LocalMem2[("Local Memory Counter")]
+        W1 -->|Simultaneous Request for Account X| LinkedInAPI["LinkedIn Voyager API"]
         W2 -->|Simultaneous Request for Account X| LinkedInAPI
-        LinkedInAPI -->|Hourly / Daily Velocity Limit Breached| BanEvent[Account Ban / Checkpoint / 429 Throttle]
+        LinkedInAPI -->|Hourly / Daily Velocity Limit Breached| BanEvent["Account Ban / Checkpoint / 429 Throttle"]
     end
 
-    subgraph Proxy_Cascade [4. Fragile Static Proxy Pool]
-        WorkerJS -->|Uses unmonitored proxy IP| StaleProxy[Stale / Degraded Proxy IP]
-        StaleProxy -->|HTTP 429 / 421 / Connection Timeout| TaskDrop[Job Drop - No Automated Rotation]
+    subgraph Proxy_Cascade ["4. Fragile Static Proxy Pool"]
+        WorkerJS -->|Uses unmonitored proxy IP| StaleProxy["Stale / Degraded Proxy IP"]
+        StaleProxy -->|HTTP 429 / 421 / Connection Timeout| TaskDrop["Job Drop - No Automated Rotation"]
     end
 
-    subgraph Pipeline_Loss [5. Non-Idempotent Data Pipeline & Silent Loss]
-        WorkerJS -->|Non-idempotent insert| PostgresDB[(PostgreSQL via Prisma)]
-        PostgresDB -->|Unsafe duplicate row insertion| DataCorruption[Duplicate Messages / Inconsistent State]
-        WorkerJS -->|Direct Webhook Dispatch| ExtWebhook[External Webhook Consumer]
-        ExtWebhook -.->|Network 5xx Error / Timeout| SilentLoss[Message Dropped - No DLQ / No Backoff Retry]
+    subgraph Pipeline_Loss ["5. Non-Idempotent Data Pipeline & Silent Loss"]
+        WorkerJS -->|Non-idempotent insert| PostgresDB[("PostgreSQL via Prisma")]
+        PostgresDB -->|Unsafe duplicate row insertion| DataCorruption["Duplicate Messages / Inconsistent State"]
+        WorkerJS -->|Direct Webhook Dispatch| ExtWebhook["External Webhook Consumer"]
+        ExtWebhook -.->|Network 5xx Error / Timeout| SilentLoss["Message Dropped - No DLQ / No Backoff Retry"]
     end
 
-    subgraph Deployment_Drift [6. DevOps & Infrastructure Fragmentation]
-        NomadStd[linkedin-console.nomad.hcl] <-->|Configuration Divergence| NomadSec[linkedin-console.secure.nomad.hcl]
-        NomadStd -.->|Divergent environment variables| StagingProdDiff[Staging vs Production Divergence]
+    subgraph Deployment_Drift ["6. DevOps & Infrastructure Fragmentation"]
+        NomadStd["linkedin-console.nomad.hcl"] <-->|Configuration Divergence| NomadSec["linkedin-console.secure.nomad.hcl"]
+        NomadStd -.->|Divergent environment variables| StagingProdDiff["Staging vs Production Divergence"]
     end
 ```
 
@@ -353,15 +353,15 @@ Consolidate `antiBan.js`, `rateLimit.js`, and `humanBehavior.js` into a cohesive
 
 ```mermaid
 flowchart TD
-    Job[Incoming Automation Job] --> Policy[Policy Orchestrator / Controller]
-    Policy --> CheckQuota{Check Distributed Token Bucket}
-    CheckQuota -->|Quota Exceeded| Delay[Apply Backoff Delay & Reschedule]
-    CheckQuota -->|Quota Available| Behavior[Human Behavior Synthesizer]
-    Behavior --> Entropy[Inject Micro-delays & Jitter]
-    Entropy --> Execute[Execute Action via Voyager / Browser]
-    Execute --> Result{Evaluate Response}
-    Result -->|200 OK| UpdateToken[Consume Velocity Token]
-    Result -->|429 Rate Limit| TriggerCooloff[Trigger Account Cool-off & Rotate Proxy]
+    Job["Incoming Automation Job"] --> Policy["Policy Orchestrator / Controller"]
+    Policy --> CheckQuota{"Check Distributed Token Bucket"}
+    CheckQuota -->|Quota Exceeded| Delay["Apply Backoff Delay & Reschedule"]
+    CheckQuota -->|Quota Available| Behavior["Human Behavior Synthesizer"]
+    Behavior --> Entropy["Inject Micro-delays & Jitter"]
+    Entropy --> Execute["Execute Action via Voyager / Browser"]
+    Execute --> Result{"Evaluate Response"}
+    Result -->|200 OK| UpdateToken["Consume Velocity Token"]
+    Result -->|429 Rate Limit| TriggerCooloff["Trigger Account Cool-off & Rotate Proxy"]
 ```
 
 ### Key Policy Components
@@ -407,7 +407,7 @@ sequenceDiagram
     participant DB as PostgreSQL (Prisma)
     participant WH as External Webhook / API
 
-    W->>EB: Publish Event (AppEvent<T>)
+    W->>EB: Publish Event (AppEvent)
     EB->>PC: Consume Event Stream
     PC->>DB: Execute Idempotent Upsert (Prisma Transaction)
     DB-->>PC: Transaction Confirmed
@@ -486,10 +486,10 @@ Standardize all logging via **Pino** structured JSON logging:
 
 ```mermaid
 graph TD
-    subgraph Test Pyramid
-        E2E[End-to-End Test Suite - Synthetic Automation Runs]
-        Integration[Integration Tests - Prisma, Redis, DLQ, Policy Engine]
-        Unit[Unit Tests - Rate Limit Math, Parsers, Behavior Jitter]
+    subgraph Test_Pyramid ["Test Pyramid"]
+        E2E["End-to-End Test Suite - Synthetic Automation Runs"]
+        Integration["Integration Tests - Prisma, Redis, DLQ, Policy Engine"]
+        Unit["Unit Tests - Rate Limit Math, Parsers, Behavior Jitter"]
     end
     
     Unit --> Integration
@@ -654,39 +654,47 @@ jobs:
 
 ```mermaid
 graph TB
-    subgraph Control Plane
-        UI[Next.js App Dashboard]
-        API[API Gateways & Webhook Handlers]
+    subgraph Control_Plane ["Control Plane"]
+        UI["Next.js App Dashboard"]
+        API["API Gateways & Webhook Handlers"]
     end
 
-    subgraph Core Services
-        Shared[Shared Contracts @shared/types]
-        Policy[Centralized Policy Orchestrator]
-        ProxyMgr[Dynamic Proxy Pool Engine]
+    subgraph Core_Services ["Core Services"]
+        Shared["Shared Contracts @shared/types"]
+        Policy["Centralized Policy Orchestrator"]
+        ProxyMgr["Dynamic Proxy Pool Engine"]
     end
 
-    subgraph Data & Persistence
-        RedisStore[(Redis: Token Buckets & Event Streams)]
-        Postgres[(PostgreSQL via Prisma)]
-        DLQ[(Dead Letter Queue)]
+    subgraph Data_Persistence ["Data & Persistence"]
+        RedisStore[("Redis: Token Buckets & Event Streams")]
+        Postgres[("PostgreSQL via Prisma")]
+        DLQ[("Dead Letter Queue")]
     end
 
-    subgraph Worker Cluster
-        W1[Worker Node 1]
-        W2[Worker Node 2]
-        WN[Worker Node N]
+    subgraph Worker_Cluster ["Worker Cluster"]
+        W1["Worker Node 1"]
+        W2["Worker Node 2"]
+        WN["Worker Node N"]
     end
 
     UI --> Shared
     API --> Shared
     W1 --> Shared
     
-    W1 & W2 & WN --> Policy
+    W1 --> Policy
+    W2 --> Policy
+    WN --> Policy
     Policy --> RedisStore
-    W1 & W2 & WN --> ProxyMgr
+    W1 --> ProxyMgr
+    W2 --> ProxyMgr
+    WN --> ProxyMgr
     
-    W1 & W2 & WN --> Postgres
-    W1 & W2 & WN --> DLQ
+    W1 --> Postgres
+    W2 --> Postgres
+    WN --> Postgres
+    W1 --> DLQ
+    W2 --> DLQ
+    WN --> DLQ
 ```
 
 ---
@@ -852,23 +860,24 @@ flowchart TD
 ### Cutover & Zero-Downtime Migration Strategy
 
 ```mermaid
-flowchart LR
-    subgraph Step 1: Shadow Mode
-        LegacyWorker[Legacy Worker Cluster] -->|Live Production Traffic| DB[(PostgreSQL)]
-        ModernWorker[Modern TS Worker Cluster] -.->|Shadow Execution / Dry Run| DB
+flowchart TD
+    subgraph Step1 ["Step 1: Shadow Mode"]
+        LegacyWorker1["Legacy Worker Cluster"] -->|Live Production Traffic| DB1[("PostgreSQL Database")]
+        ModernWorker1["Modern TS Worker Cluster"] -.->|Shadow Execution / Dry Run| DB1
     end
 
-    subgraph Step 2: Canary Routing
-        LB[Nomad / Load Balancer] -->|90% Traffic| LegacyWorker
-        LB -->|10% Traffic| ModernWorker
+    subgraph Step2 ["Step 2: Canary Routing"]
+        LB2["Nomad / Load Balancer"] -->|90% Traffic| LegacyWorker2["Legacy Worker Cluster"]
+        LB2 -->|10% Traffic| ModernWorker2["Modern TS Worker Cluster"]
     end
 
-    subgraph Step 3: Full Cutover
-        LB -->|100% Traffic| ModernWorker
-        LegacyWorker -->|Decommissioned| Retired[Archive & Deprecate]
+    subgraph Step3 ["Step 3: Full Cutover"]
+        LB3["Nomad / Load Balancer"] -->|100% Traffic| ModernWorker3["Modern TS Worker Cluster"]
+        LegacyWorker3["Legacy Worker Cluster"] -->|Decommissioned| Retired["Archive & Deprecate"]
     end
 
-    Step 1 --> Step 2 --> Step 3
+    Step1 --> Step2
+    Step2 --> Step3
 ```
 
 1. **Shadow Mode Execution (Week 9):** Run the modernized TypeScript worker in parallel with shadow event listeners to verify message parity, proxy rotation, and database upsert accuracy without dispatching live LinkedIn mutations.
