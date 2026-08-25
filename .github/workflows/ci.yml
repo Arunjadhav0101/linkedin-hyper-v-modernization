@@ -1,0 +1,63 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Lint, Typecheck & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Shared Types Contract
+        run: npm run build --workspace=@shared/types
+
+      - name: TypeScript Type Checking (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Validate Prisma Schema
+        run: npx prisma validate
+
+      - name: Execute Automated Test Suite
+        run: npm test
+
+  build-validation:
+    name: Docker Build Validation
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: actions/setup-buildx-action@v3
+
+      - name: Validate Worker Docker Image Build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./deployment/docker/Dockerfile.worker
+          push: false
+          tags: linkedin-worker:test
+
+      - name: Validate App Docker Image Build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./deployment/docker/Dockerfile.app
+          push: false
+          tags: linkedin-app:test

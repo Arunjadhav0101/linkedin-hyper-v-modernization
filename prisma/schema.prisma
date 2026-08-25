@@ -1,0 +1,195 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum AccountStatus {
+  ACTIVE
+  WARMING
+  RESTRICTED
+  RATE_LIMITED
+  CHALLENGE_REQUIRED
+  DISABLED
+}
+
+enum ProxyStatus {
+  HEALTHY
+  DEGRADED
+  BANNED
+  INACTIVE
+}
+
+enum ProxyProtocol {
+  HTTP
+  HTTPS
+  SOCKS5
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageSyncStatus {
+  SYNCED
+  PENDING
+  FAILED
+  DUPLICATE
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  RATE_LIMITED
+  DLQ_ROUTED
+  CANCELLED
+}
+
+model LinkedInAccount {
+  id                  String         @id @default(uuid())
+  email               String         @unique
+  linkedinId          String?        @unique
+  publicIdentifier    String?
+  name                String?
+  status              AccountStatus  @default(WARMING)
+  proxySessionId      String?
+  assignedProxyId     String?
+  assignedProxy       Proxy?         @relation("AccountProxy", fields: [assignedProxyId], references: [id], onDelete: SetNull)
+  cookies             Json?
+  warmupStartDate     DateTime       @default(now())
+  isWarmedUp          Boolean        @default(false)
+  
+  // Action quotas
+  hourlyActionLimit       Int        @default(15)
+  dailyActionLimit        Int        @default(60)
+  hourlyConnectionLimit   Int        @default(5)
+  dailyConnectionLimit    Int        @default(20)
+  hourlyMessageLimit      Int        @default(10)
+  dailyMessageLimit       Int        @default(40)
+  
+  lastActionTimestamp DateTime?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  conversations       Conversation[]
+  messages            ChatMessage[]
+  jobs                AutomationJob[]
+  dlqRecords          DeadLetterQueue[]
+
+  @@index([status])
+  @@index([email])
+}
+
+model Proxy {
+  id                  String         @id @default(uuid())
+  host                String
+  port                Int
+  protocol            ProxyProtocol  @default(HTTP)
+  username            String?
+  password            String?
+  countryCode         String?
+  isResidential       Boolean        @default(true)
+  status              ProxyStatus    @default(HEALTHY)
+  healthScore         Int            @default(100)
+  latencyMs           Int            @default(0)
+  consecutiveFailures Int            @default(0)
+  lastCheckedAt       DateTime?
+  bannedUntil         DateTime?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  assignedAccounts    LinkedInAccount[] @relation("AccountProxy")
+
+  @@unique([host, port, username])
+  @@index([status, healthScore])
+}
+
+model Conversation {
+  id                   String         @id @default(uuid())
+  accountId            String
+  account              LinkedInAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  remoteConversationId String
+  participantIds       String[]
+  lastMessageSnippet   String?
+  lastActivityAt       DateTime       @default(now())
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  messages             ChatMessage[]
+
+  @@unique([accountId, remoteConversationId])
+  @@index([accountId, lastActivityAt])
+}
+
+model ChatMessage {
+  id                  String            @id @default(uuid())
+  accountId           String
+  account             LinkedInAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  conversationId      String
+  conversation        Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  remoteMessageId     String
+  senderId            String
+  senderName          String?
+  recipientId         String
+  recipientName       String?
+  content             String            @db.Text
+  direction           MessageDirection
+  idempotencyKey      String            @unique
+  syncStatus          MessageSyncStatus @default(SYNCED)
+  sentAt              DateTime
+  syncedAt            DateTime          @default(now())
+
+  @@unique([accountId, conversationId, remoteMessageId])
+  @@index([accountId, syncStatus])
+  @@index([sentAt])
+}
+
+model AutomationJob {
+  id             String         @id @default(uuid())
+  traceId        String
+  accountId      String
+  account        LinkedInAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  type           String
+  payload        Json
+  priority       Int            @default(0)
+  retryCount     Int            @default(0)
+  maxRetries     Int            @default(5)
+  status         JobStatus      @default(QUEUED)
+  scheduledFor   DateTime       @default(now())
+  startedAt      DateTime?
+  completedAt    DateTime?
+  errorMessage   String?        @db.Text
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([status, scheduledFor, priority])
+  @@index([accountId, status])
+  @@index([traceId])
+}
+
+model DeadLetterQueue {
+  id              String         @id @default(uuid())
+  originalEventId String
+  traceId         String
+  eventName       String
+  accountId       String
+  account         LinkedInAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  payload         Json
+  errorName       String
+  errorMessage    String         @db.Text
+  errorStack      String?        @db.Text
+  retryAttempts   Int            @default(0)
+  isReplayed      Boolean        @default(false)
+  replayedAt      DateTime?
+  createdAt       DateTime       @default(now())
+
+  @@index([isReplayed, createdAt])
+  @@index([accountId])
+  @@index([traceId])
+}

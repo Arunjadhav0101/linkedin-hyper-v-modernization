@@ -1,0 +1,33 @@
+{
+  "name": "linkedin-hyper-v",
+  "version": "2.0.0",
+  "description": "Enterprise-grade, type-safe LinkedIn automation and synchronization platform",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "worker",
+    "app"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "tsc --noEmit --project tsconfig.json && npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "worker:dev": "npm run dev --workspace=worker",
+    "app:dev": "npm run dev --workspace=app",
+    "prisma:generate": "prisma generate",
+    "prisma:validate": "prisma validate",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "prettier": "^3.2.5",
+    "prisma": "^5.10.2",
+    "typescript": "^5.3.3",
+    "vitest": "^1.3.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

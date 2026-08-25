@@ -1,0 +1,28 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Build, Publish & Deploy to Nomad
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: actions/setup-buildx-action@v3
+
+      - name: Setup Nomad CLI
+        uses: hashicorp/setup-nomad@v2
+        with:
+          version: '1.7.2'
+
+      - name: Plan and Deploy Nomad Job
+        env:
+          NOMAD_ADDR: ${{ secrets.NOMAD_ADDR }}
+          NOMAD_TOKEN: ${{ secrets.NOMAD_TOKEN }}
+        run: |
+          nomad job run -var="environment=production" -var="image_tag=${{ github.sha }}" deployment/nomad/linkedin-console.nomad.hcl
