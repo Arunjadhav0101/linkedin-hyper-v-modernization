@@ -1,0 +1,3 @@
+# Robots.txt for LinkedIn Hyper-V
+User-agent: *
+Disallow: /api/

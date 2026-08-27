@@ -10,6 +10,11 @@ jobs:
   validate:
     name: Lint, Typecheck & Tests
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: "postgresql://postgres:password@localhost:5432/linkedin_hyper_v?schema=public"
+      REDIS_URL: "redis://localhost:6379"
+      NODE_ENV: "test"
+      LOG_LEVEL: "silent"
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -19,6 +24,9 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
+
+      - name: Setup Environment File
+        run: cp deployment/env/.env.example .env
 
       - name: Install Dependencies
         run: npm ci
