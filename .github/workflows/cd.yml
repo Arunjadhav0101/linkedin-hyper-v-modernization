@@ -3,6 +3,7 @@ name: CD Pipeline
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -13,14 +14,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: actions/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v3
 
       - name: Setup Nomad CLI
-        uses: hashicorp/setup-nomad@v2
+        uses: hashicorp/setup-nomad@v1
         with:
           version: '1.7.2'
 
-      - name: Plan and Deploy Nomad Job
+      - name: Validate Parameterized Nomad Job Template
+        run: |
+          nomad job validate -var="environment=production" -var="image_tag=${{ github.sha }}" deployment/nomad/linkedin-console.nomad.hcl
+
+      - name: Deploy to Nomad Cluster (when configured)
+        if: env.NOMAD_ADDR != ''
         env:
           NOMAD_ADDR: ${{ secrets.NOMAD_ADDR }}
           NOMAD_TOKEN: ${{ secrets.NOMAD_TOKEN }}
