@@ -16,16 +16,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Setup Nomad CLI
-        uses: hashicorp/setup-nomad@v1
-        with:
-          version: '1.7.2'
+      - name: Install Nomad CLI
+        run: |
+          curl -fsSL https://releases.hashicorp.com/nomad/1.7.2/nomad_1.7.2_linux_amd64.zip -o nomad.zip
+          sudo unzip -q -o nomad.zip -d /usr/local/bin/
+          rm -f nomad.zip
+          nomad version
 
       - name: Validate Parameterized Nomad Job Template
         run: |
           nomad job validate -var="environment=production" -var="image_tag=${{ github.sha }}" deployment/nomad/linkedin-console.nomad.hcl
 
-      - name: Deploy to Nomad Cluster (when configured)
+      - name: Deploy to Nomad Cluster
         if: env.NOMAD_ADDR != ''
         env:
           NOMAD_ADDR: ${{ secrets.NOMAD_ADDR }}

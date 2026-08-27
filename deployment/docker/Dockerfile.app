@@ -16,6 +16,7 @@ FROM base AS builder
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED 1
+ENV DATABASE_URL="postgresql://postgres:password@localhost:5432/linkedin_hyper_v?schema=public"
 RUN npm run build --workspace=@shared/types
 RUN npx prisma generate
 RUN npm run build --workspace=app
