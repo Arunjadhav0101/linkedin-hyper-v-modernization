@@ -38,7 +38,7 @@ jobs:
         run: npm run typecheck
 
       - name: Validate Prisma Schema
-        run: npx prisma validate
+        run: npx prisma validate --schema=database/schema.prisma
 
       - name: Execute Automated Test Suite
         run: npm test
@@ -54,18 +54,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Validate Worker Docker Image Build
+      - name: Validate Backend Docker Image Build
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./deployment/docker/Dockerfile.worker
+          file: ./deployment/docker/Dockerfile.backend
           push: false
-          tags: linkedin-worker:test
+          tags: linkedin-backend:test
 
-      - name: Validate App Docker Image Build
+      - name: Validate Frontend Docker Image Build
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./deployment/docker/Dockerfile.app
+          file: ./deployment/docker/Dockerfile.frontend
           push: false
-          tags: linkedin-app:test
+          tags: linkedin-frontend:test

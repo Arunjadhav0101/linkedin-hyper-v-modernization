@@ -8,12 +8,12 @@
   },
   "include": [
     "packages/**/*",
-    "worker/**/*",
+    "backend/**/*",
     "tests/**/*"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    "app"
+    "frontend"
   ]
 }

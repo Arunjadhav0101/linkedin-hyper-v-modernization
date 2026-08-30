@@ -5,8 +5,8 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "worker",
-    "app"
+    "backend",
+    "frontend"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
@@ -14,10 +14,10 @@
     "lint": "npm run lint --workspaces --if-present",
     "test": "vitest run",
     "test:watch": "vitest",
-    "worker:dev": "npm run dev --workspace=worker",
-    "app:dev": "npm run dev --workspace=app",
-    "prisma:generate": "prisma generate",
-    "prisma:validate": "prisma validate",
+    "backend:dev": "npm run dev --workspace=backend",
+    "frontend:dev": "npm run dev --workspace=frontend",
+    "prisma:generate": "prisma generate --schema=database/schema.prisma",
+    "prisma:validate": "prisma validate --schema=database/schema.prisma",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\""
   },
   "devDependencies": {

@@ -4,6 +4,21 @@ This guide will walk you through setting up and running the **LinkedIn Hyper-V**
 
 ---
 
+## 📁 Repository Structure Overview
+
+```
+linkedin-hyper-v-modernization/
+├── frontend/             # Next.js Dashboard & Control Plane UI
+├── backend/              # TypeScript Background Automation & Outbox Engine
+├── database/             # Prisma Schema & PostgreSQL ORM
+├── packages/
+│   └── shared/           # @shared/types domain models and IPC event contracts
+├── deployment/           # Dockerfiles, Nomad job specs, and environment configs
+└── tests/                # Automated unit and integration test suites
+```
+
+---
+
 ## 📋 Prerequisites
 
 Ensure you have the following installed on your system:
@@ -61,7 +76,7 @@ HEALTH_PORT=8088
 
 ### 3. Install Monorepo Dependencies
 
-Install dependencies across all workspaces (`packages/shared`, `worker`, and `app`):
+Install dependencies across all workspaces (`packages/shared`, `backend`, and `frontend`):
 
 ```bash
 npm install
@@ -71,17 +86,17 @@ npm install
 
 ### 4. Build Shared Contracts & Generate Database Client
 
-Build the `@shared/types` contract layer and generate the Prisma ORM client:
+Build the `@shared/types` contract layer and generate the Prisma ORM client from `database/`:
 
 ```bash
 # 1. Compile Shared Types contract layer
 npm run build --workspace=@shared/types
 
 # 2. Generate Prisma Client bindings
-npx prisma generate
+npx prisma generate --schema=database/schema.prisma
 
 # 3. (Optional) Sync database schema with PostgreSQL
-npx prisma db push
+npx prisma db push --schema=database/schema.prisma
 ```
 
 ---
@@ -106,21 +121,21 @@ npm test
 
 Open two terminal windows:
 
-#### Terminal 1 — Next.js Dashboard & Control Plane:
+#### Terminal 1 — Next.js Frontend Dashboard:
 ```bash
-npm run app:dev
+npm run frontend:dev
 ```
 > Access dashboard at: **[http://localhost:3000](http://localhost:3000)**
 
-#### Terminal 2 — Worker Engine (Background Automation & Health Probes):
+#### Terminal 2 — Backend Engine (Background Automation & Health Probes):
 ```bash
 # On Linux / macOS / Git Bash:
-HEALTH_PORT=8088 npm run worker:dev
+HEALTH_PORT=8088 npm run backend:dev
 
 # On Windows (PowerShell):
-$env:HEALTH_PORT="8088"; npm run worker:dev
+$env:HEALTH_PORT="8088"; npm run backend:dev
 ```
-> Worker health probe active at: **[http://localhost:8088/healthz](http://localhost:8088/healthz)**
+> Backend health probe active at: **[http://localhost:8088/healthz](http://localhost:8088/healthz)**
 
 ---
 
@@ -132,11 +147,11 @@ Build and start the compiled standalone production bundles:
 # 1. Build all packages and applications
 npm run build
 
-# 2. Start the production Next.js application
-npm start --workspace=app
+# 2. Start the production Next.js frontend
+npm start --workspace=frontend
 
-# 3. In another terminal, start the production Worker engine
-HEALTH_PORT=8088 npm start --workspace=worker
+# 3. In another terminal, start the production Backend engine
+HEALTH_PORT=8088 npm start --workspace=backend
 ```
 
 ---
@@ -145,16 +160,16 @@ HEALTH_PORT=8088 npm start --workspace=worker
 
 You can build and run individual multi-stage Alpine containers:
 
-#### Build Worker Image:
+#### Build Backend Image:
 ```bash
-docker build -f deployment/docker/Dockerfile.worker -t linkedin-worker:latest .
-docker run -d --name linkedin-worker -p 8088:8080 --env-file .env linkedin-worker:latest
+docker build -f deployment/docker/Dockerfile.backend -t linkedin-backend:latest .
+docker run -d --name linkedin-backend -p 8088:8080 --env-file .env linkedin-backend:latest
 ```
 
-#### Build Next.js App Image:
+#### Build Frontend App Image:
 ```bash
-docker build -f deployment/docker/Dockerfile.app -t linkedin-app:latest .
-docker run -d --name linkedin-app -p 3000:3000 --env-file .env linkedin-app:latest
+docker build -f deployment/docker/Dockerfile.frontend -t linkedin-frontend:latest .
+docker run -d --name linkedin-frontend -p 3000:3000 --env-file .env linkedin-frontend:latest
 ```
 
 ---
@@ -166,8 +181,8 @@ docker run -d --name linkedin-app -p 3000:3000 --env-file .env linkedin-app:late
 | **Control Plane UI** | `3000` | [http://localhost:3000](http://localhost:3000) | Web Dashboard & Account Management |
 | **API Health Status** | `3000` | [http://localhost:3000/api/health](http://localhost:3000/api/health) | Full system health check (DB/Redis status) |
 | **Message Deduplication** | `3000` | `POST /api/maintenance/messages/dedupe` | Trigger transactional message deduplication |
-| **Worker Health Probe** | `8088` | [http://localhost:8088/healthz](http://localhost:8088/healthz) | Worker liveness probe |
-| **Worker System Metrics** | `8088` | [http://localhost:8088/metrics](http://localhost:8088/metrics) | Real-time proxy pool stats & queue depth |
+| **Backend Health Probe** | `8088` | [http://localhost:8088/healthz](http://localhost:8088/healthz) | Backend liveness probe |
+| **Backend System Metrics** | `8088` | [http://localhost:8088/metrics](http://localhost:8088/metrics) | Real-time proxy pool stats & queue depth |
 
 ---
 
@@ -175,7 +190,7 @@ docker run -d --name linkedin-app -p 3000:3000 --env-file .env linkedin-app:late
 
 ### 1. `Error: listen EADDRINUSE: address already in use :::8080`
 - **Cause**: Another service is using port `8080`.
-- **Solution**: Run the worker with a custom port by setting `HEALTH_PORT=8088` (e.g. `$env:HEALTH_PORT="8088"; npm run worker:dev`).
+- **Solution**: Run the backend with a custom port by setting `HEALTH_PORT=8088` (e.g. `$env:HEALTH_PORT="8088"; npm run backend:dev`).
 
 ### 2. `Cannot find module '@shared/types'`
 - **Cause**: The shared contract layer has not been compiled yet.

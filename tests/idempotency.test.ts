@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   PersistenceConsumer,
   MemoryMessageRepository,
-} from '../worker/src/events/PersistenceConsumer.js';
+} from '../backend/src/events/PersistenceConsumer.js';
 import { AppEvent } from '@shared/types';
 
 describe('Data Pipeline Idempotency & Deduplication', () => {

@@ -1,5 +1,5 @@
 {
-  "name": "@hyper-v/app",
+  "name": "@hyper-v/frontend",
   "version": "2.0.0",
   "description": "Next.js Dashboard & Control Plane for LinkedIn Hyper-V",
   "private": true,

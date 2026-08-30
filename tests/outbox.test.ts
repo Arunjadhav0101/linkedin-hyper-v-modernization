@@ -2,12 +2,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   OutboxPublisher,
   MemoryOutboxStorage,
-} from '../worker/src/events/OutboxPublisher.js';
-import { EventBus } from '../worker/src/events/EventBus.js';
+} from '../backend/src/events/OutboxPublisher.js';
+import { EventBus } from '../backend/src/events/EventBus.js';
 import {
   DeadLetterQueueManager,
   MemoryDLQStorage,
-} from '../worker/src/events/DeadLetterQueue.js';
+} from '../backend/src/events/DeadLetterQueue.js';
 
 describe('Transactional Outbox Pattern (Feature 1)', () => {
   let storage: MemoryOutboxStorage;

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DynamicProxyPool } from '../worker/src/proxy/DynamicProxyPool.js';
+import { DynamicProxyPool } from '../backend/src/proxy/DynamicProxyPool.js';
 import { ProxyNode } from '@shared/types';
 
 describe('DynamicProxyPool Resilience Engine', () => {

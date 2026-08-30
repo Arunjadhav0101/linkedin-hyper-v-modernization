@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   DeadLetterQueueManager,
   MemoryDLQStorage,
-} from '../worker/src/events/DeadLetterQueue.js';
+} from '../backend/src/events/DeadLetterQueue.js';
 import { AppEvent } from '@shared/types';
 
 describe('DeadLetterQueue & Exponential Backoff Subsystem', () => {

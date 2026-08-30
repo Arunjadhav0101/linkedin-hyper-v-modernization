@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { PolicyOrchestrator, MemoryPolicyStore } from '../worker/src/policy/PolicyOrchestrator.js';
-import { HumanBehavior } from '../worker/src/policy/HumanBehavior.js';
+import { PolicyOrchestrator, MemoryPolicyStore } from '../backend/src/policy/PolicyOrchestrator.js';
+import { HumanBehavior } from '../backend/src/policy/HumanBehavior.js';
 import { AccountVelocityLimits } from '@shared/types';
 
 describe('PolicyOrchestrator & Anti-Ban Architecture', () => {
