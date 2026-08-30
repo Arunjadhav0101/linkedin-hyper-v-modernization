@@ -1,7 +1,7 @@
 # Multi-Stage Alpine Dockerfile for Backend Engine
 FROM node:20-alpine AS base
 WORKDIR /app
-RUN apk add --no-cache libc6-compat
+RUN apk add --no-cache libc6-compat openssl
 
 # Step 1: Install dependencies
 FROM base AS dependencies
@@ -16,7 +16,9 @@ RUN npm ci
 FROM base AS builder
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
+ENV DATABASE_URL="postgresql://postgres:password@localhost:5432/linkedin_hyper_v?schema=public"
 RUN npm run build --workspace=@shared/types
+RUN npx prisma generate --schema=database/schema.prisma
 RUN npm run build --workspace=@hyper-v/backend
 
 # Step 3: Production runner with non-root user

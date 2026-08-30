@@ -22,10 +22,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "declaration": true,
-    "sourceMap": true,
-    "baseUrl": ".",
-    "paths": {
-      "@shared/*": ["./packages/shared/src/*"]
-    }
+    "sourceMap": true
   }
 }

@@ -1,4 +1,4 @@
-import pino from 'pino';
+import { pino } from 'pino';
 
 export interface LogContext {
   traceId?: string;
@@ -12,7 +12,7 @@ export interface LogContext {
 export const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
   formatters: {
-    level: (label) => ({ level: label }),
+    level: (label: string) => ({ level: label }),
   },
   timestamp: pino.stdTimeFunctions.isoTime,
   redact: {
