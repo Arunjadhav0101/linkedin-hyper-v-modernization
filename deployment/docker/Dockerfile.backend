@@ -14,8 +14,8 @@ RUN npm ci
 
 # Step 2: Build the TypeScript backend engine
 FROM base AS builder
-COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
+COPY --from=dependencies /app/node_modules ./node_modules
 ENV DATABASE_URL="postgresql://postgres:password@localhost:5432/linkedin_hyper_v?schema=public"
 RUN npm run build --workspace=@shared/types
 RUN npx prisma generate --schema=database/schema.prisma
@@ -29,7 +29,9 @@ RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 backendus
 USER backenduser
 
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/shared/package.json ./packages/shared/package.json
 COPY --from=builder /app/backend/dist ./backend/dist
+COPY --from=builder /app/backend/package.json ./backend/package.json
 COPY --from=builder /app/database ./database
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
