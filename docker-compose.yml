@@ -1,0 +1,126 @@
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: hyperv-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: linkedin_hyper_v
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d linkedin_hyper_v"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hyperv-network
+
+  # ---------------------------------------------------------------------------
+  # 2. Redis Message Broker & Token Bucket Store
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: hyperv-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hyperv-network
+
+  # ---------------------------------------------------------------------------
+  # 3. Database Schema Synchronizer (Prisma db push)
+  # ---------------------------------------------------------------------------
+  db-init:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.backend
+    container_name: hyperv-db-init
+    command: ["npx", "prisma", "db", "push", "--schema=database/schema.prisma"]
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgrespassword@postgres:5432/linkedin_hyper_v?schema=public"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - hyperv-network
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # 4. Backend Automation Engine & Outbox Publisher
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.backend
+    container_name: hyperv-backend
+    restart: unless-stopped
+    ports:
+      - "8088:8080"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://postgres:postgrespassword@postgres:5432/linkedin_hyper_v?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      HEALTH_PORT: "8080"
+      LOG_LEVEL: info
+      OUTBOX_POLL_INTERVAL_MS: "2000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    networks:
+      - hyperv-network
+
+  # ---------------------------------------------------------------------------
+  # 5. Frontend Next.js Dashboard & Control Plane
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.frontend
+    container_name: hyperv-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://postgres:postgrespassword@postgres:5432/linkedin_hyper_v?schema=public"
+      PORT: "3000"
+      NEXT_PUBLIC_APP_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+    networks:
+      - hyperv-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  hyperv-network:
+    driver: bridge

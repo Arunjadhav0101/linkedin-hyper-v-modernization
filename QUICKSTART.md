@@ -1,6 +1,6 @@
 # 🚀 Quick Start & Setup Guide
 
-This guide will walk you through setting up and running the **LinkedIn Hyper-V** enterprise automation platform from scratch.
+This guide will walk you through setting up and running the entire **LinkedIn Hyper-V** enterprise automation platform from scratch.
 
 ---
 
@@ -14,14 +14,43 @@ linkedin-hyper-v-modernization/
 ├── packages/
 │   └── shared/           # @shared/types domain models and IPC event contracts
 ├── deployment/           # Dockerfiles, Nomad job specs, and environment configs
+├── docker-compose.yml    # Full-stack container orchestration
 └── tests/                # Automated unit and integration test suites
 ```
 
 ---
 
-## 📋 Prerequisites
+## ⚡ Quickest Start (Docker Compose — 1 Command)
 
-Ensure you have the following installed on your system:
+If you have **Docker & Docker Compose** installed, you can boot the entire ecosystem (PostgreSQL, Redis, Auto DB Migrations, Backend Worker, and Frontend UI) in a single command:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/Arunjadhav0101/linkedin-hyper-v-modernization.git
+cd linkedin-hyper-v-modernization
+
+# 2. Launch all services
+docker compose up --build -d
+```
+
+### Checking Container Health:
+```bash
+# View live container status
+docker compose ps
+
+# Stream logs
+docker compose logs -f
+```
+
+* **Frontend Dashboard:** [http://localhost:3000](http://localhost:3000)
+* **Backend Health Probe:** [http://localhost:8088/healthz](http://localhost:8088/healthz)
+* **Backend Metrics:** [http://localhost:8088/metrics](http://localhost:8088/metrics)
+
+---
+
+## 📋 Manual Setup & Development Prerequisites
+
+If running directly on your host machine without Docker Compose, ensure you have:
 - **Node.js**: `v20.0.0` or higher ([Download Node.js](https://nodejs.org/))
 - **npm**: `v10.0.0` or higher (bundled with Node.js)
 - **PostgreSQL**: `v15` or higher (or Docker)
@@ -30,18 +59,9 @@ Ensure you have the following installed on your system:
 
 ---
 
-## ⚙️ Step-by-Step Setup from Scratch
+## ⚙️ Step-by-Step Manual Setup
 
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/Arunjadhav0101/linkedin-hyper-v-modernization.git
-cd linkedin-hyper-v-modernization
-```
-
----
-
-### 2. Configure Environment Variables
+### 1. Configure Environment Variables
 
 Copy the example blueprint into your local `.env` file:
 
@@ -74,7 +94,7 @@ HEALTH_PORT=8088
 
 ---
 
-### 3. Install Monorepo Dependencies
+### 2. Install Monorepo Dependencies
 
 Install dependencies across all workspaces (`packages/shared`, `backend`, and `frontend`):
 
@@ -84,7 +104,7 @@ npm install
 
 ---
 
-### 4. Build Shared Contracts & Generate Database Client
+### 3. Build Shared Contracts & Generate Database Client
 
 Build the `@shared/types` contract layer and generate the Prisma ORM client from `database/`:
 
@@ -101,7 +121,7 @@ npx prisma db push --schema=database/schema.prisma
 
 ---
 
-### 5. Validate Type Safety & Run Tests
+### 4. Validate Type Safety & Run Tests
 
 Run the automated verification suite to ensure 100% type safety and module health:
 
@@ -152,24 +172,6 @@ npm start --workspace=frontend
 
 # 3. In another terminal, start the production Backend engine
 HEALTH_PORT=8088 npm start --workspace=backend
-```
-
----
-
-### Option C: Docker Deployment
-
-You can build and run individual multi-stage Alpine containers:
-
-#### Build Backend Image:
-```bash
-docker build -f deployment/docker/Dockerfile.backend -t linkedin-backend:latest .
-docker run -d --name linkedin-backend -p 8088:8080 --env-file .env linkedin-backend:latest
-```
-
-#### Build Frontend App Image:
-```bash
-docker build -f deployment/docker/Dockerfile.frontend -t linkedin-frontend:latest .
-docker run -d --name linkedin-frontend -p 3000:3000 --env-file .env linkedin-frontend:latest
 ```
 
 ---
