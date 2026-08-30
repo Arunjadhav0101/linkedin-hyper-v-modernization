@@ -5,6 +5,7 @@ import { DynamicProxyPool } from './proxy/DynamicProxyPool.js';
 import { EventBus } from './events/EventBus.js';
 import { PersistenceConsumer, MemoryMessageRepository } from './events/PersistenceConsumer.js';
 import { DeadLetterQueueManager, MemoryDLQStorage } from './events/DeadLetterQueue.js';
+import { OutboxPublisher, MemoryOutboxStorage } from './events/OutboxPublisher.js';
 
 class WorkerApplication implements HealthProvider {
   private healthServer: HealthServer;
@@ -13,6 +14,7 @@ class WorkerApplication implements HealthProvider {
   private eventBus: EventBus;
   private persistenceConsumer: PersistenceConsumer;
   private dlqManager: DeadLetterQueueManager;
+  private outboxPublisher: OutboxPublisher;
   private isRunning = false;
   private startTime = Date.now();
 
@@ -22,6 +24,11 @@ class WorkerApplication implements HealthProvider {
     this.eventBus = new EventBus();
     this.persistenceConsumer = new PersistenceConsumer(new MemoryMessageRepository());
     this.dlqManager = new DeadLetterQueueManager(new MemoryDLQStorage());
+    this.outboxPublisher = new OutboxPublisher(
+      new MemoryOutboxStorage(),
+      this.eventBus,
+      this.dlqManager
+    );
     this.healthServer = new HealthServer(this, parseInt(process.env.HEALTH_PORT || '8080', 10));
 
     this.registerEventHandlers();
@@ -62,12 +69,14 @@ class WorkerApplication implements HealthProvider {
     logger.info('Starting LinkedIn Hyper-V Worker Engine v2.0.0...');
     this.isRunning = true;
     await this.healthServer.start();
+    this.outboxPublisher.start(parseInt(process.env.OUTBOX_POLL_INTERVAL_MS || '2000', 10));
     logger.info('Worker Engine successfully initialized and ready for jobs');
   }
 
   public async stop(): Promise<void> {
     logger.info('Shutting down Worker Engine...');
     this.isRunning = false;
+    this.outboxPublisher.stop();
     await this.healthServer.stop();
     logger.info('Worker Engine gracefully stopped');
   }

@@ -4,6 +4,7 @@ export * from './models/proxy.js';
 export * from './models/message.js';
 export * from './models/job.js';
 export * from './models/dlq.js';
+export * from './models/outbox.js';
 
 // Events
 export * from './events/ipc.js';

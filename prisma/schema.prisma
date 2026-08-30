@@ -51,6 +51,14 @@ enum JobStatus {
   CANCELLED
 }
 
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+  DLQ_ROUTED
+}
+
 model LinkedInAccount {
   id                  String         @id @default(uuid())
   email               String         @unique
@@ -192,4 +200,26 @@ model DeadLetterQueue {
   @@index([isReplayed, createdAt])
   @@index([accountId])
   @@index([traceId])
+}
+
+model OutboxEvent {
+  id              String         @id @default(uuid())
+  eventType       String
+  payload         Json
+  aggregateId     String
+  aggregateType   String
+  traceId         String
+  status          OutboxStatus   @default(PENDING)
+  retryCount      Int            @default(0)
+  maxRetries      Int            @default(5)
+  lastError       String?        @db.Text
+  nextRetryAt     DateTime       @default(now())
+  processedAt     DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([status, nextRetryAt])
+  @@index([aggregateId])
+  @@index([traceId])
+  @@index([createdAt])
 }
