@@ -8,6 +8,8 @@ FROM base AS dependencies
 COPY package.json package-lock.json* ./
 COPY packages/shared/package.json ./packages/shared/
 COPY backend/package.json ./backend/
+COPY frontend/package.json ./frontend/
+COPY database ./database
 RUN npm ci
 
 # Step 2: Build the TypeScript backend engine
@@ -26,6 +28,7 @@ USER backenduser
 
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/backend/dist ./backend/dist
+COPY --from=builder /app/database ./database
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 
