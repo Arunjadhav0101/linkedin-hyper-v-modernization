@@ -1,30 +1,30 @@
+variable "environment" {
+  type        = string
+  description = "Deployment target environment (staging, production)"
+  default     = "production"
+}
+
+variable "worker_count" {
+  type        = number
+  description = "Number of worker engine instances to scale"
+  default     = 3
+}
+
+variable "app_count" {
+  type        = number
+  description = "Number of Next.js dashboard instances"
+  default     = 2
+}
+
+variable "image_tag" {
+  type        = string
+  description = "Docker image tag / commit hash to deploy"
+  default     = "latest"
+}
+
 job "linkedin-hyper-v" {
   datacenters = ["dc1"]
   type        = "service"
-
-  variable "environment" {
-    type        = string
-    description = "Deployment target environment (staging, production)"
-    default     = "production"
-  }
-
-  variable "worker_count" {
-    type        = number
-    description = "Number of worker engine instances to scale"
-    default     = 3
-  }
-
-  variable "app_count" {
-    type        = number
-    description = "Number of Next.js dashboard instances"
-    default     = 2
-  }
-
-  variable "image_tag" {
-    type        = string
-    description = "Docker image tag / commit hash to deploy"
-    default     = "latest"
-  }
 
   group "web-app" {
     count = var.app_count
@@ -36,7 +36,7 @@ job "linkedin-hyper-v" {
     }
 
     service {
-      name = "linkedin-hyper-v-app"
+      name = "linkedin-hyper-v-frontend"
       port = "http"
 
       check {
@@ -47,11 +47,11 @@ job "linkedin-hyper-v" {
       }
     }
 
-    task "app-service" {
+    task "frontend-service" {
       driver = "docker"
 
       config {
-        image = "registry.internal.net/linkedin-app:${var.image_tag}"
+        image = "registry.internal.net/linkedin-frontend:${var.image_tag}"
         ports = ["http"]
       }
 
@@ -72,7 +72,7 @@ EOH
     }
   }
 
-  group "worker-engine" {
+  group "backend-engine" {
     count = var.worker_count
 
     network {
@@ -82,7 +82,7 @@ EOH
     }
 
     service {
-      name = "linkedin-hyper-v-worker"
+      name = "linkedin-hyper-v-backend"
       port = "health"
 
       check {
@@ -93,11 +93,11 @@ EOH
       }
     }
 
-    task "worker-service" {
+    task "backend-service" {
       driver = "docker"
 
       config {
-        image = "registry.internal.net/linkedin-worker:${var.image_tag}"
+        image = "registry.internal.net/linkedin-backend:${var.image_tag}"
         ports = ["health"]
       }
 
@@ -108,8 +108,9 @@ DATABASE_URL="{{ key "linkedin-hyper-v/${var.environment}/database_url" }}"
 REDIS_URL="{{ key "linkedin-hyper-v/${var.environment}/redis_url" }}"
 LOG_LEVEL="{{ keyOrDefault "linkedin-hyper-v/${var.environment}/log_level" "info" }}"
 HEALTH_PORT="8080"
+OUTBOX_POLL_INTERVAL_MS="2000"
 EOH
-        destination = "secrets/worker.env"
+        destination = "secrets/backend.env"
         env         = true
       }
 
