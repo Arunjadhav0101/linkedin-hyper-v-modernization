@@ -91,6 +91,8 @@ export default function LinkedInControlPlane() {
 
   // UI status
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<{ verified: boolean; message: string } | null>(null);
   const [submissionFeedback, setSubmissionFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string; jobId?: string } | null>(null);
 
   // Fetch Accounts
@@ -326,6 +328,40 @@ export default function LinkedInControlPlane() {
       }
     } catch (err: any) {
       alert(err.message);
+    }
+  };
+
+  // Handle Verify Session with LinkedIn directly
+  const handleVerifySession = async (accountId?: string) => {
+    setIsVerifying(true);
+    setVerifyResult(null);
+    try {
+      const res = await fetch('/api/accounts/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accountId: accountId || selectedAccountId,
+          li_at: newLiAt.trim() || undefined,
+          JSESSIONID: newJsessionId.trim() || undefined,
+        }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setVerifyResult({
+          verified: true,
+          message: `✓ Valid Session! Logged in as: ${json.data.publicIdentifier || 'LinkedIn Member'} (Status 200 OK)`,
+        });
+        fetchAccounts();
+      } else {
+        setVerifyResult({
+          verified: false,
+          message: `❌ ${json.error?.message || 'Verification failed'}`,
+        });
+      }
+    } catch (err: any) {
+      setVerifyResult({ verified: false, message: `❌ Error: ${err.message}` });
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -998,12 +1034,38 @@ export default function LinkedInControlPlane() {
                 />
               </div>
 
-              <button
-                type="submit"
-                style={{ width: '100%', background: '#0284c7', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
-              >
-                Save Account & Credentials
-              </button>
+              {verifyResult && (
+                <div
+                  style={{
+                    marginBottom: 14,
+                    padding: '10px 14px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    backgroundColor: verifyResult.verified ? '#064e3b' : '#7f1d1d',
+                    color: '#fff',
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {verifyResult.message}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button
+                  type="submit"
+                  style={{ flex: 1, background: '#0284c7', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
+                >
+                  Save Account & Credentials
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleVerifySession()}
+                  disabled={isVerifying}
+                  style={{ background: '#334155', color: '#38bdf8', border: '1px solid #0284c7', padding: '10px 14px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
+                >
+                  {isVerifying ? 'Testing...' : '🔍 Test Live'}
+                </button>
+              </div>
             </form>
           </div>
         </div>
