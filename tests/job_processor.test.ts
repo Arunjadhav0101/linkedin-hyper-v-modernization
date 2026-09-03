@@ -191,6 +191,7 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
   it('completes CONNECTION_REQUEST_SENT when connection request succeeds', async () => {
     vi.spyOn(voyagerClient, 'sendConnectionRequest').mockResolvedValue({
       invitationId: 'inv_123',
+      resolvedProfileId: 'vanity-satya',
     });
 
     const publishedEvents: any[] = [];

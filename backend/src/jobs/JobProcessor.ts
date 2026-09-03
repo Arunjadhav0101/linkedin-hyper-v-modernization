@@ -266,9 +266,69 @@ export class JobProcessor {
     }
 
     // Execute via Circuit Breaker & Real Voyager HTTP client
-    await this.circuitBreaker.execute(() =>
+    const result = await this.circuitBreaker.execute(() =>
       this.voyagerClient.sendConnectionRequest(account, targetProfileId, customNote)
     );
+
+    // If custom note (invitation message) was included, also record as outbound ChatMessage in PostgreSQL
+    if (customNote && customNote.trim().length > 0) {
+      const convRemoteId = `inv_${targetProfileId}`;
+      const remoteMsgId = `inv_msg_${result.invitationId}`;
+      const idempotencyKey = PersistenceConsumer.generateIdempotencyKey(
+        account.id,
+        convRemoteId,
+        remoteMsgId
+      );
+
+      const conv = await this.prisma.conversation.upsert({
+        where: {
+          accountId_remoteConversationId: {
+            accountId: account.id,
+            remoteConversationId: convRemoteId,
+          },
+        },
+        update: {
+          lastMessageSnippet: customNote.slice(0, 200),
+          lastActivityAt: new Date(),
+        },
+        create: {
+          accountId: account.id,
+          remoteConversationId: convRemoteId,
+          participantIds: [account.id, targetProfileId],
+          lastMessageSnippet: customNote.slice(0, 200),
+          lastActivityAt: new Date(),
+        },
+      });
+
+      await this.prisma.chatMessage.create({
+        data: {
+          id: remoteMsgId,
+          accountId: account.id,
+          conversationId: conv.id,
+          remoteMessageId: remoteMsgId,
+          senderId: account.id,
+          senderName: account.name ?? account.email,
+          recipientId: targetProfileId,
+          content: customNote,
+          direction: 'OUTBOUND',
+          idempotencyKey,
+          syncStatus: 'SYNCED',
+          sentAt: new Date(),
+        },
+      });
+
+      await this.eventBus.publish(
+        'MESSAGE_SENT',
+        {
+          accountId: account.id,
+          conversationId: convRemoteId,
+          remoteMessageId: remoteMsgId,
+          recipientId: targetProfileId,
+          content: customNote,
+        },
+        job.traceId
+      );
+    }
 
     // Publish CONNECTION_REQUEST_SENT event
     await this.eventBus.publish(

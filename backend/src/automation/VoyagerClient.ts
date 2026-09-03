@@ -294,23 +294,68 @@ export class VoyagerClient {
   }
 
   /**
+   * Resolves a public vanity name (e.g. 'arun-jadhav-a80222318') to LinkedIn's internal profileId / URN
+   */
+  public async resolveProfileId(account: LinkedInAccount, identifier: string): Promise<string> {
+    const clean = VoyagerClient.cleanProfileIdentifier(identifier);
+
+    // If already a full URN or internal ID, return directly
+    if (clean.startsWith('urn:li:') || clean.startsWith('ACoAA')) {
+      return clean;
+    }
+
+    try {
+      // Query profile details from LinkedIn Voyager API
+      const profileRes = await this.executeRequest<any>(account, {
+        endpoint: `/identity/profiles/${clean}`,
+        method: 'GET',
+        actionType: 'RESOLVE_PROFILE',
+      });
+
+      const profileData = profileRes.data;
+      const internalId =
+        profileData?.miniProfile?.dashEntityUrn ||
+        profileData?.miniProfile?.entityUrn ||
+        profileData?.entityUrn ||
+        profileData?.plainId;
+
+      if (internalId) {
+        logger.info(
+          { identifier: clean, resolvedId: internalId },
+          'Successfully resolved public vanity name to internal LinkedIn profile ID'
+        );
+        return internalId;
+      }
+    } catch (err: any) {
+      logger.warn(
+        { identifier: clean, error: err.message },
+        'Vanity profile resolution encountered error; falling back to clean identifier'
+      );
+    }
+
+    return clean;
+  }
+
+  /**
    * Real implementation to send a LinkedIn connection request invitation
    */
   public async sendConnectionRequest(
     account: LinkedInAccount,
     targetProfileId: string,
     customNote?: string
-  ): Promise<{ invitationId: string }> {
+  ): Promise<{ invitationId: string; resolvedProfileId: string }> {
     const cleanId = VoyagerClient.cleanProfileIdentifier(targetProfileId);
+    const resolvedProfileId = await this.resolveProfileId(account, cleanId);
+
     logger.info(
-      { accountId: account.id, targetProfileId, cleanId },
+      { accountId: account.id, targetProfileId, cleanId, resolvedProfileId },
       'Executing real Send Connection Request action on LinkedIn'
     );
 
     const payload = {
       invitee: {
         'com.linkedin.voyager.growth.invitation.InviteeProfile': {
-          profileId: cleanId,
+          profileId: resolvedProfileId,
         },
       },
       message: customNote || null,
@@ -328,7 +373,7 @@ export class VoyagerClient {
       res.data?.invitationId ||
       `inv_${Date.now()}`;
 
-    return { invitationId };
+    return { invitationId, resolvedProfileId };
   }
 
   /**
