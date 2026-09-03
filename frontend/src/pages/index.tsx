@@ -214,6 +214,17 @@ export default function HyperVControlPlane() {
     e.preventDefault();
     if (!newAccountEmail) return;
 
+    if (newLiAt && newLiAt.trim().length < 50) {
+      alert(
+        "⚠️ Invalid li_at Cookie: The cookie you entered is only " +
+          newLiAt.trim().length +
+          " characters ('" +
+          newLiAt +
+          "').\n\nA real LinkedIn session cookie is an encrypted token (~150 characters) starting with 'AQED...'.\n\nDo not enter your LinkedIn password here. Please copy the 'li_at' cookie from your browser DevTools (F12 -> Application -> Cookies)."
+      );
+      return;
+    }
+
     try {
       const res = await fetch('/api/accounts', {
         method: 'POST',
@@ -800,25 +811,31 @@ export default function HyperVControlPlane() {
               </div>
 
               <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>li_at Session Cookie:</label>
+                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>li_at Session Cookie (Required for Real Actions):</label>
                 <input
                   type="password"
-                  placeholder="AQED..."
+                  placeholder="AQEDAT... (~150 characters)"
                   value={newLiAt}
                   onChange={(e) => setNewLiAt(e.target.value)}
                   style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box' }}
                 />
+                <div style={{ fontSize: 11, color: '#38bdf8', marginTop: 4, lineHeight: 1.4 }}>
+                  💡 <b>Do NOT enter your password here.</b> In Chrome/Edge on <i>linkedin.com</i>, press <code>F12</code> &rarr; Application tab &rarr; Cookies &rarr; copy value of <b><code>li_at</code></b> (starts with <code>AQED...</code>).
+                </div>
               </div>
 
               <div style={{ marginBottom: 16 }}>
                 <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>JSESSIONID Cookie (CSRF Token):</label>
                 <input
                   type="text"
-                  placeholder='ajax:...'
+                  placeholder='ajax:9876543210...'
                   value={newJsessionId}
                   onChange={(e) => setNewJsessionId(e.target.value)}
                   style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box' }}
                 />
+                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+                  Found under the same Cookies tab as <b><code>JSESSIONID</code></b>.
+                </div>
               </div>
 
               <button

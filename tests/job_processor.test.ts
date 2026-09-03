@@ -23,7 +23,7 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
     email: 'worker-lead@company.com',
     name: 'Worker Lead',
     status: 'ACTIVE',
-    cookies: { li_at: 'AQED_SAMPLE_TOKEN', JSESSIONID: 'ajax:123' },
+    cookies: { li_at: 'AQED_SAMPLE_TOKEN_VALID_SESSION_FOR_TESTING_1234567890_LONGER_THAN_FIFTY', JSESSIONID: 'ajax:123' },
     hourlyActionLimit: 20,
     dailyActionLimit: 60,
     hourlyConnectionLimit: 10,

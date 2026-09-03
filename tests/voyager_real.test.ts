@@ -17,7 +17,7 @@ describe('VoyagerClient Real Integration & Zero-Simulation Verification', () => 
     status: 'ACTIVE',
     isWarmedUp: true,
     cookies: {
-      li_at: 'AQED_REAL_LINKEDIN_AUTH_TOKEN_SAMPLE_123',
+      li_at: 'AQED_REAL_LINKEDIN_AUTH_TOKEN_SAMPLE_123_LONG_SESSION_CREDENTIAL_KEY_TEST',
       JSESSIONID: 'ajax:987654321',
     },
     limits: {
@@ -62,7 +62,7 @@ describe('VoyagerClient Real Integration & Zero-Simulation Verification', () => 
 
   it('correctly validates session and extracts li_at and JSESSIONID for authorized accounts', () => {
     const session = client.validateAccountSession(validAccount);
-    expect(session.liAt).toBe('AQED_REAL_LINKEDIN_AUTH_TOKEN_SAMPLE_123');
+    expect(session.liAt).toBe('AQED_REAL_LINKEDIN_AUTH_TOKEN_SAMPLE_123_LONG_SESSION_CREDENTIAL_KEY_TEST');
     expect(session.jsessionId).toBe('ajax:987654321');
   });
 
@@ -72,7 +72,7 @@ describe('VoyagerClient Real Integration & Zero-Simulation Verification', () => 
       ok: false,
       status: 401,
       headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ status: 401, message: 'Invalid or expired li_at session cookie' }),
+      text: async () => JSON.stringify({ status: 401, message: 'Invalid or expired li_at session cookie' }),
     });
     global.fetch = mockFetch;
 
@@ -88,7 +88,7 @@ describe('VoyagerClient Real Integration & Zero-Simulation Verification', () => 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const callArgs = mockFetch.mock.calls[0];
     const headers = callArgs[1].headers;
-    expect(headers['Cookie']).toContain('li_at=AQED_REAL_LINKEDIN_AUTH_TOKEN_SAMPLE_123');
+    expect(headers['Cookie']).toContain('li_at=AQED_REAL_LINKEDIN_AUTH_TOKEN_SAMPLE_123_LONG_SESSION_CREDENTIAL_KEY_TEST');
     expect(headers['csrf-token']).toBe('ajax:987654321');
     expect(headers['x-restli-protocol-version']).toBe('2.0.0');
   });
@@ -108,7 +108,7 @@ describe('VoyagerClient Real Integration & Zero-Simulation Verification', () => 
       ok: true,
       status: 200,
       headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => mockData,
+      text: async () => JSON.stringify(mockData),
     });
 
     const response = await client.fetchConversations(validAccount, 10);

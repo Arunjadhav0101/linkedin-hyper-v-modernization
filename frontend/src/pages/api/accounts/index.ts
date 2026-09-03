@@ -68,14 +68,22 @@ export default async function handler(
       success: true,
       data: accounts.map((acc) => {
         const cookies = (acc.cookies as Record<string, string>) || {};
-        const hasLiAt = Boolean(cookies.li_at && cookies.li_at.trim().length > 0);
+        const liAt = (cookies.li_at || '').trim();
+        const hasValidSession = liAt.length >= 50;
+        let sessionStatus = 'MISSING_SESSION_COOKIE';
+        if (liAt.length > 0 && liAt.length < 50) {
+          sessionStatus = 'INVALID_COOKIE_TOO_SHORT';
+        } else if (hasValidSession) {
+          sessionStatus = 'AUTHORIZED';
+        }
+
         return {
           id: acc.id,
           email: acc.email,
           name: acc.name,
           status: acc.status,
-          hasAuthorizedSession: hasLiAt,
-          sessionStatus: hasLiAt ? 'AUTHORIZED' : 'MISSING_SESSION_COOKIE',
+          hasAuthorizedSession: hasValidSession,
+          sessionStatus,
           hourlyActionLimit: acc.hourlyActionLimit,
           dailyActionLimit: acc.dailyActionLimit,
           hourlyConnectionLimit: acc.hourlyConnectionLimit,

@@ -45,20 +45,41 @@ export class VoyagerClient {
   }
 
   /**
+   * Cleans and extracts LinkedIn profile vanity identifier from URLs or raw input
+   */
+  public static cleanProfileIdentifier(input: string): string {
+    let clean = input.trim();
+    if (clean.includes('linkedin.com/in/')) {
+      const match = clean.match(/linkedin\.com\/in\/([a-zA-Z0-9\-_%]+)/);
+      if (match && match[1]) {
+        clean = decodeURIComponent(match[1]);
+      }
+    }
+    clean = clean.replace(/\s+/g, '-').replace(/\/+$/, '');
+    return clean;
+  }
+
+  /**
    * Validates whether an account possesses authorized session credentials
    */
   public validateAccountSession(account: LinkedInAccount): { liAt: string; jsessionId: string } {
     const cookies = account.cookies || {};
-    const liAt = cookies.li_at || cookies['li_at'];
-    const jsessionId = cookies.JSESSIONID || cookies['JSESSIONID'] || '';
+    const liAt = (cookies.li_at || cookies['li_at'] || '').trim();
+    const jsessionId = (cookies.JSESSIONID || cookies['JSESSIONID'] || '').trim();
 
-    if (!liAt || liAt.trim().length === 0) {
+    if (!liAt || liAt.length === 0) {
       const msg = `Missing integration: Account '${account.id}' (${account.email}) does not have an authorized session. Missing required 'li_at' cookie.`;
       logger.error({ accountId: account.id, email: account.email }, msg);
       throw new MissingIntegrationError(msg);
     }
 
-    return { liAt: liAt.trim(), jsessionId: jsessionId.trim() };
+    if (liAt.length < 50) {
+      const msg = `Invalid LinkedIn session cookie: The 'li_at' cookie for '${account.email}' is only ${liAt.length} chars ('${liAt.slice(0, 8)}...'). A real LinkedIn session cookie is an encrypted ~150-character token starting with 'AQED...'. You entered a password or placeholder instead of the browser session cookie.`;
+      logger.error({ accountId: account.id, email: account.email }, msg);
+      throw new MissingIntegrationError(msg);
+    }
+
+    return { liAt, jsessionId };
   }
 
   /**
@@ -139,15 +160,17 @@ export class VoyagerClient {
         responseHeaders[key] = value;
       });
 
+      // Read response body ONCE as text to safely handle JSON and non-JSON without Body unusable errors
+      const rawText = await response.text();
+      let parsedData: any = null;
+      try {
+        parsedData = JSON.parse(rawText);
+      } catch {
+        parsedData = rawText;
+      }
+
       // 8. Handle non-2xx LinkedIn responses without faking
       if (!response.ok) {
-        let errorBody: any = null;
-        try {
-          errorBody = await response.json();
-        } catch {
-          errorBody = await response.text();
-        }
-
         if (status === 429 || status === 421 || status === 999) {
           await this.policy.triggerCooloff(account.id);
           if (proxy) {
@@ -161,22 +184,19 @@ export class VoyagerClient {
             status,
             url,
             durationMs,
-            errorBody,
+            errorBody: typeof parsedData === 'string' ? parsedData.slice(0, 300) : parsedData,
           },
           'LinkedIn Voyager API responded with non-2xx HTTP status'
         );
 
-        throw new VoyagerApiError(status, `LinkedIn HTTP error ${status}`, errorBody);
+        const errorDetail = typeof parsedData === 'object' && parsedData?.message
+          ? parsedData.message
+          : `HTTP ${status}`;
+        throw new VoyagerApiError(status, errorDetail, parsedData);
       }
 
       // 9. Process real success response
-      let responseData: T;
-      const contentType = response.headers.get('content-type') || '';
-      if (contentType.includes('application/json')) {
-        responseData = (await response.json()) as T;
-      } else {
-        responseData = (await response.text()) as unknown as T;
-      }
+      const responseData = parsedData as T;
 
       await this.policy.recordActionExecution(account.id, actionType);
       if (proxy) {
@@ -216,8 +236,9 @@ export class VoyagerClient {
     content: string,
     conversationId?: string
   ): Promise<{ remoteMessageId: string; conversationId: string }> {
+    const cleanRecipient = VoyagerClient.cleanProfileIdentifier(recipientId);
     logger.info(
-      { accountId: account.id, recipientId, conversationId },
+      { accountId: account.id, recipientId, cleanRecipient, conversationId },
       'Executing real Send Message action on LinkedIn'
     );
 
@@ -236,7 +257,7 @@ export class VoyagerClient {
       : {
           keyVersion: 'LEGACY_INBOX',
           conversationCreate: {
-            recipients: [recipientId],
+            recipients: [cleanRecipient],
             subtype: 'MEMBER_TO_MEMBER',
             eventCreate: {
               value: {
@@ -267,7 +288,7 @@ export class VoyagerClient {
     const returnedConvId =
       conversationId ||
       res.data?.value?.conversationUrn?.replace('urn:li:fs_conversation:', '') ||
-      `conv_${recipientId}`;
+      `conv_${cleanRecipient}`;
 
     return { remoteMessageId, conversationId: returnedConvId };
   }
@@ -280,15 +301,16 @@ export class VoyagerClient {
     targetProfileId: string,
     customNote?: string
   ): Promise<{ invitationId: string }> {
+    const cleanId = VoyagerClient.cleanProfileIdentifier(targetProfileId);
     logger.info(
-      { accountId: account.id, targetProfileId },
+      { accountId: account.id, targetProfileId, cleanId },
       'Executing real Send Connection Request action on LinkedIn'
     );
 
     const payload = {
       invitee: {
         'com.linkedin.voyager.growth.invitation.InviteeProfile': {
-          profileId: targetProfileId,
+          profileId: cleanId,
         },
       },
       message: customNote || null,
