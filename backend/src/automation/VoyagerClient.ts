@@ -305,15 +305,17 @@ export class VoyagerClient {
     }
 
     try {
-      // Query profile details from LinkedIn Voyager API
+      // Query modern profile dash endpoint from LinkedIn Voyager API
       const profileRes = await this.executeRequest<any>(account, {
-        endpoint: `/identity/profiles/${clean}`,
+        endpoint: `/identity/dash/profiles?q=memberIdentity&memberIdentity=${encodeURIComponent(clean)}`,
         method: 'GET',
         actionType: 'RESOLVE_PROFILE',
       });
 
       const profileData = profileRes.data;
+      const elements = profileData?.['*elements'] || profileData?.elements || [];
       const internalId =
+        elements[0] ||
         profileData?.miniProfile?.dashEntityUrn ||
         profileData?.miniProfile?.entityUrn ||
         profileData?.entityUrn ||
