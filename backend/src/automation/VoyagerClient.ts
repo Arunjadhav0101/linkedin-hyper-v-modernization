@@ -34,6 +34,13 @@ export class VoyagerApiError extends Error {
   }
 }
 
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+
 export class VoyagerClient {
   private policy: PolicyOrchestrator;
   private proxyPool: DynamicProxyPool;
@@ -237,6 +244,16 @@ export class VoyagerClient {
     conversationId?: string
   ): Promise<{ remoteMessageId: string; conversationId: string }> {
     const cleanRecipient = VoyagerClient.cleanProfileIdentifier(recipientId);
+
+    // Self-Action Guard: Prevent sending message to own profile
+    if (
+      (account.publicIdentifier && cleanRecipient.toLowerCase() === account.publicIdentifier.toLowerCase()) ||
+      (account.linkedinId && cleanRecipient.toLowerCase() === account.linkedinId.toLowerCase()) ||
+      (account.email && cleanRecipient.toLowerCase() === account.email.toLowerCase())
+    ) {
+      throw new ValidationError(`Cannot send message to your own profile ('${cleanRecipient}')`);
+    }
+
     logger.info(
       { accountId: account.id, recipientId, cleanRecipient, conversationId },
       'Executing real Send Message action on LinkedIn'
@@ -347,17 +364,42 @@ export class VoyagerClient {
     customNote?: string
   ): Promise<{ invitationId: string; resolvedProfileId: string }> {
     const cleanId = VoyagerClient.cleanProfileIdentifier(targetProfileId);
+
+    // Self-Action Guard: Prevent inviting own profile which causes HTTP 422 Unprocessable Entity
+    if (
+      (account.publicIdentifier && cleanId.toLowerCase() === account.publicIdentifier.toLowerCase()) ||
+      (account.linkedinId && cleanId.toLowerCase() === account.linkedinId.toLowerCase()) ||
+      (account.email && cleanId.toLowerCase() === account.email.toLowerCase())
+    ) {
+      throw new ValidationError(`Cannot send connection request invitation to your own profile ('${cleanId}')`);
+    }
+
     const resolvedProfileId = await this.resolveProfileId(account, cleanId);
 
+    // Also check if resolved profile matches own profile URN or identifier
+    if (
+      (account.publicIdentifier && resolvedProfileId.includes(account.publicIdentifier)) ||
+      (account.linkedinId && resolvedProfileId.includes(account.linkedinId))
+    ) {
+      throw new ValidationError(`Cannot send connection request invitation to your own profile ('${cleanId}')`);
+    }
+
+    let inviteProfileId = resolvedProfileId;
+    if (inviteProfileId.startsWith('urn:li:fsd_profile:')) {
+      inviteProfileId = inviteProfileId.replace('urn:li:fsd_profile:', '');
+    } else if (inviteProfileId.startsWith('urn:li:fs_miniProfile:')) {
+      inviteProfileId = inviteProfileId.replace('urn:li:fs_miniProfile:', '');
+    }
+
     logger.info(
-      { accountId: account.id, targetProfileId, cleanId, resolvedProfileId },
+      { accountId: account.id, targetProfileId, cleanId, resolvedProfileId, inviteProfileId },
       'Executing real Send Connection Request action on LinkedIn'
     );
 
     const payload = {
       invitee: {
         'com.linkedin.voyager.growth.invitation.InviteeProfile': {
-          profileId: resolvedProfileId,
+          profileId: inviteProfileId,
         },
       },
       message: customNote || null,

@@ -1,11 +1,12 @@
 import { logger } from '../observability/logger.js';
+import { ErrorClassifier } from '../errors/ErrorClassifier.js';
 
 export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
 export interface CircuitBreakerConfig {
-  failureThreshold?: number;    // Number of failures before opening (default: 5)
-  cooldownMs?: number;          // Cooldown before entering HALF_OPEN (default: 30000ms)
-  successThreshold?: number;    // Successes in HALF_OPEN to close (default: 2)
+  failureThreshold?: number; // Number of failures before opening (default: 5)
+  cooldownMs?: number; // Cooldown before entering HALF_OPEN (default: 30000ms)
+  successThreshold?: number; // Successes in HALF_OPEN to close (default: 2)
 }
 
 export class CircuitBreakerOpenError extends Error {
@@ -16,6 +17,8 @@ export class CircuitBreakerOpenError extends Error {
 }
 
 export class CircuitBreaker {
+  private static instances: Map<string, CircuitBreaker> = new Map();
+
   private state: CircuitState = 'CLOSED';
   private failureCount = 0;
   private successCount = 0;
@@ -33,6 +36,18 @@ export class CircuitBreaker {
     this.failureThreshold = config.failureThreshold ?? 5;
     this.cooldownMs = config.cooldownMs ?? 30000;
     this.successThreshold = config.successThreshold ?? 2;
+    CircuitBreaker.instances.set(serviceName, this);
+  }
+
+  public static get(serviceName: string): CircuitBreaker | undefined {
+    return CircuitBreaker.instances.get(serviceName);
+  }
+
+  public static resetAll(): void {
+    for (const breaker of CircuitBreaker.instances.values()) {
+      breaker.reset();
+    }
+    logger.info('All circuit breakers have been reset to CLOSED');
   }
 
   public getState(): CircuitState {
@@ -72,7 +87,16 @@ export class CircuitBreaker {
       this.onSuccess();
       return result;
     } catch (err: any) {
-      this.onFailure(err);
+      // CRITICAL FIX: Only record failure for transient upstream errors.
+      // Permanent client/auth/validation errors (400, 401, 403, 404, 422) MUST NOT trip the circuit breaker!
+      if (!ErrorClassifier.isPermanent(err)) {
+        this.onFailure(err);
+      } else {
+        logger.debug(
+          { service: this.serviceName, error: err.message },
+          'Permanent client error encountered; ignored by circuit breaker failure counter'
+        );
+      }
       throw err;
     }
   }
@@ -107,7 +131,7 @@ export class CircuitBreaker {
       this.nextAttemptTime = Date.now() + this.cooldownMs;
       logger.error(
         { service: this.serviceName, failureCount: this.failureCount, threshold: this.failureThreshold },
-        'Circuit breaker tripped to OPEN state due to consecutive failures'
+        'Circuit breaker tripped to OPEN state due to consecutive upstream failures'
       );
     }
   }
@@ -118,5 +142,6 @@ export class CircuitBreaker {
     this.successCount = 0;
     this.lastFailureTime = 0;
     this.nextAttemptTime = 0;
+    logger.info({ service: this.serviceName }, 'Circuit breaker manually reset to CLOSED');
   }
 }

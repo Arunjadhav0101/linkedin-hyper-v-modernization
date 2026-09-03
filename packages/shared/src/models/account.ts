@@ -6,6 +6,12 @@ export type AccountStatus =
   | 'CHALLENGE_REQUIRED'
   | 'DISABLED';
 
+export type AccountAuthStatus =
+  | 'NOT_CONFIGURED'
+  | 'AUTHORIZED'
+  | 'SESSION_INVALID'
+  | 'DISABLED';
+
 export interface AccountVelocityLimits {
   hourlyActionLimit: number;
   dailyActionLimit: number;
@@ -22,6 +28,7 @@ export interface LinkedInAccount {
   publicIdentifier?: string;
   name?: string;
   status: AccountStatus;
+  authStatus?: AccountAuthStatus;
   proxySessionId?: string;
   assignedProxyId?: string;
   cookies?: Record<string, string>;

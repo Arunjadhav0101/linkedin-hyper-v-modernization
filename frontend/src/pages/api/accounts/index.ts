@@ -64,26 +64,45 @@ export default async function handler(
       });
     }
 
+    // Fetch pending jobs and last error for each account
+    const jobs = await prisma.automationJob.findMany({
+      where: {
+        status: { in: ['QUEUED', 'RUNNING', 'RETRYING', 'FAILED', 'DLQ_ROUTED'] },
+      },
+      select: { id: true, accountId: true, status: true, errorMessage: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
     return res.status(200).json({
       success: true,
       data: accounts.map((acc) => {
         const cookies = (acc.cookies as Record<string, string>) || {};
         const liAt = (cookies.li_at || '').trim();
-        const hasValidSession = liAt.length >= 50;
-        let sessionStatus = 'MISSING_SESSION_COOKIE';
-        if (liAt.length > 0 && liAt.length < 50) {
-          sessionStatus = 'INVALID_COOKIE_TOO_SHORT';
-        } else if (hasValidSession) {
-          sessionStatus = 'AUTHORIZED';
+
+        let authStatus: 'NOT_CONFIGURED' | 'AUTHORIZED' | 'SESSION_INVALID' | 'DISABLED' = 'NOT_CONFIGURED';
+        if (acc.status === 'DISABLED') {
+          authStatus = 'DISABLED';
+        } else if (!liAt || liAt.length === 0) {
+          authStatus = 'NOT_CONFIGURED';
+        } else if (liAt.length < 50) {
+          authStatus = 'SESSION_INVALID';
+        } else {
+          authStatus = 'AUTHORIZED';
         }
+
+        const accountJobs = jobs.filter((j) => j.accountId === acc.id);
+        const pendingJobsCount = accountJobs.filter((j) => j.status === 'QUEUED' || j.status === 'RUNNING' || j.status === 'RETRYING').length;
+        const lastFailedJob = accountJobs.find((j) => j.status === 'FAILED' || j.status === 'DLQ_ROUTED');
 
         return {
           id: acc.id,
           email: acc.email,
           name: acc.name,
           status: acc.status,
-          hasAuthorizedSession: hasValidSession,
-          sessionStatus,
+          authStatus,
+          hasAuthorizedSession: authStatus === 'AUTHORIZED',
+          lastError: lastFailedJob?.errorMessage || null,
+          pendingJobsCount,
           hourlyActionLimit: acc.hourlyActionLimit,
           dailyActionLimit: acc.dailyActionLimit,
           hourlyConnectionLimit: acc.hourlyConnectionLimit,
@@ -116,13 +135,22 @@ export default async function handler(
     const { email, name, linkedinId, publicIdentifier, cookies, hourlyActionLimit, dailyActionLimit } =
       parseResult.data;
 
+    // Sanitize and trim session cookies
+    const cleanedCookies: Record<string, string> = {};
+    if (cookies?.li_at) {
+      cleanedCookies.li_at = cookies.li_at.trim().replace(/^['"]+|['"]+$/g, '');
+    }
+    if (cookies?.JSESSIONID) {
+      cleanedCookies.JSESSIONID = cookies.JSESSIONID.trim().replace(/^['"]+|['"]+$/g, '');
+    }
+
     const account = await prisma.linkedInAccount.upsert({
       where: { email },
       update: {
         name,
         linkedinId,
         publicIdentifier,
-        cookies: cookies as any,
+        cookies: cleanedCookies as any,
         hourlyActionLimit,
         dailyActionLimit,
       },
@@ -132,14 +160,14 @@ export default async function handler(
         name,
         linkedinId,
         publicIdentifier,
-        cookies: cookies as any,
+        cookies: cleanedCookies as any,
         hourlyActionLimit,
         dailyActionLimit,
         status: 'ACTIVE',
       },
     });
 
-    const hasLiAt = Boolean(cookies?.li_at && cookies.li_at.trim().length > 0);
+    const hasLiAt = Boolean(cleanedCookies.li_at && cleanedCookies.li_at.length >= 50);
 
     return res.status(201).json({
       success: true,

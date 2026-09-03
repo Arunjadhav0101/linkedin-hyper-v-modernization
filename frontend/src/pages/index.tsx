@@ -1,14 +1,78 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import Head from 'next/head';
 
-type Tab = 'dashboard' | 'accounts' | 'messages' | 'connections' | 'jobs' | 'sync' | 'health';
+type Tab = 'dashboard' | 'messages' | 'connections' | 'jobs' | 'sync' | 'accounts' | 'health';
 
-export default function HyperVControlPlane() {
+interface Account {
+  id: string;
+  email: string;
+  name?: string;
+  status: string;
+  authStatus?: 'NOT_CONFIGURED' | 'AUTHORIZED' | 'SESSION_INVALID' | 'DISABLED';
+  hasAuthorizedSession: boolean;
+  lastError?: string | null;
+  pendingJobsCount?: number;
+  hourlyActionLimit: number;
+  dailyActionLimit: number;
+  hourlyConnectionLimit: number;
+  dailyConnectionLimit: number;
+  hourlyMessageLimit: number;
+  dailyMessageLimit: number;
+  lastActionTimestamp?: string;
+  assignedProxy?: any;
+}
+
+interface AutomationJob {
+  id: string;
+  traceId: string;
+  accountId: string;
+  accountEmail?: string;
+  type: string;
+  payload: any;
+  status: string;
+  priority: number;
+  retryCount: number;
+  maxRetries: number;
+  errorMessage?: string;
+  scheduledFor: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+}
+
+interface ChatMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  senderName?: string;
+  recipientId: string;
+  recipientName?: string;
+  content: string;
+  direction: 'INBOUND' | 'OUTBOUND';
+  syncStatus: string;
+  sentAt: string;
+  idempotencyKey: string;
+}
+
+interface SystemHealth {
+  status: string;
+  database: string;
+  redis: string;
+  activeAccounts: number;
+  activeProxies: number;
+  circuitBreaker: {
+    state: string;
+    failureCount: number;
+    nextAttemptTime: number;
+  };
+}
+
+export default function LinkedInControlPlane() {
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
-  const [accounts, setAccounts] = useState<any[]>([]);
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [messages, setMessages] = useState<any[]>([]);
-  const [health, setHealth] = useState<any>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [jobs, setJobs] = useState<AutomationJob[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [health, setHealth] = useState<SystemHealth | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
   // Form states
@@ -17,14 +81,17 @@ export default function HyperVControlPlane() {
   const [messageContent, setMessageContent] = useState('');
   const [targetProfileId, setTargetProfileId] = useState('');
   const [connectionNote, setConnectionNote] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submissionFeedback, setSubmissionFeedback] = useState<{ type: 'success' | 'error'; message: string; jobId?: string } | null>(null);
+  const [selectedConversationId, setSelectedConversationId] = useState<string>('');
 
-  // Account creation / session cookie update form
+  // Account config form
   const [newAccountEmail, setNewAccountEmail] = useState('');
   const [newAccountName, setNewAccountName] = useState('');
   const [newLiAt, setNewLiAt] = useState('');
   const [newJsessionId, setNewJsessionId] = useState('');
+
+  // UI status
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submissionFeedback, setSubmissionFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string; jobId?: string } | null>(null);
 
   // Fetch Accounts
   const fetchAccounts = useCallback(async () => {
@@ -43,7 +110,7 @@ export default function HyperVControlPlane() {
   // Fetch Jobs
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/jobs?limit=30');
+      const res = await fetch('/api/jobs?limit=50');
       const json = await res.json();
       if (json.success && json.data) {
         setJobs(json.data);
@@ -54,7 +121,7 @@ export default function HyperVControlPlane() {
   // Fetch Messages
   const fetchMessages = useCallback(async () => {
     try {
-      const res = await fetch('/api/messages?limit=30');
+      const res = await fetch('/api/messages?limit=50');
       const json = await res.json();
       if (json.success && json.data) {
         setMessages(json.data);
@@ -90,6 +157,8 @@ export default function HyperVControlPlane() {
     return () => clearInterval(interval);
   }, [autoRefresh, fetchAccounts, fetchJobs, fetchMessages, fetchHealth]);
 
+  const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
+
   // Handle Send Message
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -108,6 +177,7 @@ export default function HyperVControlPlane() {
           payload: {
             recipientId: messageRecipient,
             content: messageContent,
+            conversationId: selectedConversationId || undefined,
           },
         }),
       });
@@ -116,7 +186,7 @@ export default function HyperVControlPlane() {
       if (json.success) {
         setSubmissionFeedback({
           type: 'success',
-          message: `Job ${json.data.jobId} created with status QUEUED. Background worker is picking it up.`,
+          message: `Message Job ${json.data.jobId} created with status QUEUED. Dispatched to worker.`,
           jobId: json.data.jobId,
         });
         setMessageContent('');
@@ -124,7 +194,7 @@ export default function HyperVControlPlane() {
       } else {
         setSubmissionFeedback({
           type: 'error',
-          message: json.error?.message || 'Failed to queue message job',
+          message: json.error?.message || 'Failed to dispatch message job',
         });
       }
     } catch (err: any) {
@@ -160,7 +230,7 @@ export default function HyperVControlPlane() {
       if (json.success) {
         setSubmissionFeedback({
           type: 'success',
-          message: `Connection Job ${json.data.jobId} created with status QUEUED.`,
+          message: `Connection Job ${json.data.jobId} created with status QUEUED. Dispatched to worker.`,
           jobId: json.data.jobId,
         });
         setTargetProfileId('');
@@ -179,7 +249,7 @@ export default function HyperVControlPlane() {
     }
   };
 
-  // Handle Message Sync
+  // Handle Trigger Sync
   const handleTriggerSync = async () => {
     if (!selectedAccountId) return;
     setIsSubmitting(true);
@@ -191,6 +261,7 @@ export default function HyperVControlPlane() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ accountId: selectedAccountId, limit: 20 }),
       });
+
       const json = await res.json();
       if (json.success) {
         setSubmissionFeedback({
@@ -200,7 +271,10 @@ export default function HyperVControlPlane() {
         });
         fetchJobs();
       } else {
-        setSubmissionFeedback({ type: 'error', message: json.error?.message || 'Failed to trigger sync' });
+        setSubmissionFeedback({
+          type: 'error',
+          message: json.error?.message || 'Failed to dispatch sync job',
+        });
       }
     } catch (err: any) {
       setSubmissionFeedback({ type: 'error', message: err.message });
@@ -209,18 +283,18 @@ export default function HyperVControlPlane() {
     }
   };
 
-  // Save / Update Account Credentials
+  // Handle Save Account
   const handleSaveAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newAccountEmail) return;
 
-    if (newLiAt && newLiAt.trim().length < 50) {
+    const trimmedLiAt = newLiAt.trim();
+    if (trimmedLiAt.length > 0 && trimmedLiAt.length < 50) {
       alert(
-        "⚠️ Invalid li_at Cookie: The cookie you entered is only " +
-          newLiAt.trim().length +
-          " characters ('" +
-          newLiAt +
-          "').\n\nA real LinkedIn session cookie is an encrypted token (~150 characters) starting with 'AQED...'.\n\nDo not enter your LinkedIn password here. Please copy the 'li_at' cookie from your browser DevTools (F12 -> Application -> Cookies)."
+        `Invalid 'li_at' cookie: You entered ${trimmedLiAt.length} characters ('${trimmedLiAt.slice(0, 8)}...').\n\n` +
+        `A real LinkedIn session cookie is ~150 characters long and begins with 'AQED...'.\n` +
+        `You entered your account password or placeholder instead of the browser session cookie.\n\n` +
+        `To get the real cookie:\n1. Log into linkedin.com in Chrome\n2. Press F12 -> Application -> Storage -> Cookies -> https://www.linkedin.com\n3. Copy the 'li_at' value.`
       );
       return;
     }
@@ -233,11 +307,12 @@ export default function HyperVControlPlane() {
           email: newAccountEmail,
           name: newAccountName || undefined,
           cookies: {
-            li_at: newLiAt || undefined,
-            JSESSIONID: newJsessionId || undefined,
+            li_at: trimmedLiAt || undefined,
+            JSESSIONID: newJsessionId.trim() || undefined,
           },
         }),
       });
+
       const json = await res.json();
       if (json.success) {
         setNewAccountEmail('');
@@ -245,9 +320,28 @@ export default function HyperVControlPlane() {
         setNewLiAt('');
         setNewJsessionId('');
         fetchAccounts();
-        alert('Account configured successfully!');
+        alert('Account credentials successfully saved and validated!');
       } else {
         alert(json.error?.message || 'Failed to save account');
+      }
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  // Handle Maintenance Actions (Retry failed, clear DLQ)
+  const handleMaintenance = async (action: 'RETRY_DLQ' | 'CLEAR_DLQ') => {
+    try {
+      const res = await fetch('/api/maintenance/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        alert(action === 'RETRY_DLQ' ? 'All failed and DLQ jobs re-queued for execution!' : 'DLQ cleared!');
+        fetchJobs();
+        fetchHealth();
       }
     } catch (err: any) {
       alert(err.message);
@@ -264,21 +358,46 @@ export default function HyperVControlPlane() {
       case 'COMPLETED':
       case 'SENT':
         return <span style={{ backgroundColor: '#065f46', color: '#34d399', padding: '3px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>COMPLETED</span>;
+      case 'RETRYING':
+        return <span style={{ backgroundColor: '#c2410c', color: '#fed7aa', padding: '3px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>RETRYING</span>;
       case 'FAILED':
         return <span style={{ backgroundColor: '#991b1b', color: '#fca5a5', padding: '3px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>FAILED</span>;
       case 'RATE_LIMITED':
         return <span style={{ backgroundColor: '#9a3412', color: '#fdba74', padding: '3px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>RATE_LIMITED</span>;
       case 'DLQ_ROUTED':
         return <span style={{ backgroundColor: '#581c87', color: '#d8b4fe', padding: '3px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>DLQ_ROUTED</span>;
+      case 'TIMED_OUT':
+        return <span style={{ backgroundColor: '#475569', color: '#cbd5e1', padding: '3px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>TIMED_OUT</span>;
       default:
         return <span style={{ backgroundColor: '#334155', color: '#cbd5e1', padding: '3px 8px', borderRadius: 4, fontSize: 12 }}>{status}</span>;
     }
   };
 
-  const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
+  const renderAuthBadge = (authStatus?: string) => {
+    switch (authStatus) {
+      case 'AUTHORIZED':
+        return <span style={{ color: '#34d399', background: '#065f46', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>AUTHORIZED</span>;
+      case 'SESSION_INVALID':
+        return <span style={{ color: '#fca5a5', background: '#7f1d1d', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>SESSION_INVALID</span>;
+      case 'DISABLED':
+        return <span style={{ color: '#94a3b8', background: '#334155', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>DISABLED</span>;
+      default:
+        return <span style={{ color: '#fde047', background: '#713f12', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>NOT_CONFIGURED</span>;
+    }
+  };
+
+  // Group messages by conversation / contact
+  const conversationMap = new Map<string, ChatMessage[]>();
+  messages.forEach((m) => {
+    const key = m.conversationId || m.recipientId || m.senderId;
+    if (!conversationMap.has(key)) conversationMap.set(key, []);
+    conversationMap.get(key)!.push(m);
+  });
+  const conversationKeys = Array.from(conversationMap.keys());
+  const activeChatMessages = (selectedConversationId && conversationMap.get(selectedConversationId)) || messages;
 
   // Calculate metrics
-  const pendingCount = jobs.filter((j) => j.status === 'QUEUED' || j.status === 'RUNNING').length;
+  const pendingCount = jobs.filter((j) => j.status === 'QUEUED' || j.status === 'RUNNING' || j.status === 'RETRYING').length;
   const completedCount = jobs.filter((j) => j.status === 'COMPLETED').length;
   const failedCount = jobs.filter((j) => j.status === 'FAILED' || j.status === 'RATE_LIMITED').length;
   const dlqCount = jobs.filter((j) => j.status === 'DLQ_ROUTED').length;
@@ -286,8 +405,8 @@ export default function HyperVControlPlane() {
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '30px 20px', fontFamily: 'system-ui, -apple-system, sans-serif', color: '#f8fafc' }}>
       <Head>
-        <title>LinkedIn Hyper-V | Control Plane & Execution Engine</title>
-        <meta name="description" content="Type-safe LinkedIn automation, messaging and sync platform" />
+        <title>LinkedIn Hyper-V 2.0 | Control Plane</title>
+        <meta name="description" content="Type-safe LinkedIn automation and execution engine" />
       </Head>
 
       {/* Header */}
@@ -349,103 +468,60 @@ export default function HyperVControlPlane() {
       {submissionFeedback && (
         <div
           style={{
-            marginBottom: 20,
-            padding: 14,
+            backgroundColor: submissionFeedback.type === 'success' ? '#064e3b' : submissionFeedback.type === 'error' ? '#7f1d1d' : '#1e3a8a',
+            border: `1px solid ${submissionFeedback.type === 'success' ? '#059669' : submissionFeedback.type === 'error' ? '#dc2626' : '#3b82f6'}`,
+            color: '#fff',
+            padding: '12px 16px',
             borderRadius: 8,
-            backgroundColor: submissionFeedback.type === 'success' ? '#064e3b' : '#7f1d1d',
-            border: `1px solid ${submissionFeedback.type === 'success' ? '#059669' : '#dc2626'}`,
-            color: '#f8fafc',
-            fontSize: 14,
+            marginBottom: 20,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
           }}
         >
-          <strong>{submissionFeedback.type === 'success' ? '✓ Success: ' : '✕ Error: '}</strong>
-          {submissionFeedback.message}
+          <span>{submissionFeedback.type === 'success' ? '✓ ' : '⚠️ '} {submissionFeedback.message}</span>
+          <button onClick={() => setSubmissionFeedback(null)} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 16 }}>×</button>
         </div>
       )}
 
-      {/* TAB 1: DASHBOARD OVERVIEW */}
+      {/* TAB 1: DASHBOARD */}
       {activeTab === 'dashboard' && (
         <div>
+          {/* Top KPI Metrics */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16, marginBottom: 24 }}>
-            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Active Accounts</div>
-              <div style={{ fontSize: 28, fontWeight: 700, marginTop: 4 }}>{accounts.length}</div>
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 18 }}>
+              <div style={{ color: '#94a3b8', fontSize: 13, fontWeight: 500 }}>Active Accounts</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: '#38bdf8', marginTop: 4 }}>{accounts.length}</div>
             </div>
-            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Pending Jobs</div>
-              <div style={{ fontSize: 28, fontWeight: 700, marginTop: 4, color: '#fef08a' }}>{pendingCount}</div>
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 18 }}>
+              <div style={{ color: '#94a3b8', fontSize: 13, fontWeight: 500 }}>Pending / Active Jobs</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: '#facc15', marginTop: 4 }}>{pendingCount}</div>
             </div>
-            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Completed / Sent</div>
-              <div style={{ fontSize: 28, fontWeight: 700, marginTop: 4, color: '#34d399' }}>{completedCount}</div>
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 18 }}>
+              <div style={{ color: '#94a3b8', fontSize: 13, fontWeight: 500 }}>Completed / Sent</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: '#34d399', marginTop: 4 }}>{completedCount}</div>
             </div>
-            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Failed Jobs</div>
-              <div style={{ fontSize: 28, fontWeight: 700, marginTop: 4, color: '#fca5a5' }}>{failedCount}</div>
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 18 }}>
+              <div style={{ color: '#94a3b8', fontSize: 13, fontWeight: 500 }}>Failed Jobs</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: '#f87171', marginTop: 4 }}>{failedCount}</div>
             </div>
-            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>DLQ Size</div>
-              <div style={{ fontSize: 28, fontWeight: 700, marginTop: 4, color: '#d8b4fe' }}>{dlqCount}</div>
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 18 }}>
+              <div style={{ color: '#94a3b8', fontSize: 13, fontWeight: 500 }}>DLQ Routed</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: '#c084fc', marginTop: 4 }}>{dlqCount}</div>
             </div>
-            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Messages Ingested</div>
-              <div style={{ fontSize: 28, fontWeight: 700, marginTop: 4, color: '#38bdf8' }}>{messages.length}</div>
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 18 }}>
+              <div style={{ color: '#94a3b8', fontSize: 13, fontWeight: 500 }}>Messages Ingested</div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: '#60a5fa', marginTop: 4 }}>{messages.length}</div>
             </div>
           </div>
 
-          {/* Quick Actions & Recent Jobs preview */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 20 }}>
-            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20 }}>
-              <h3 style={{ marginTop: 0, fontSize: 16, color: '#38bdf8' }}>Quick Control Plane</h3>
-              <p style={{ fontSize: 13, color: '#94a3b8', lineHeight: 1.4 }}>
-                Select an account and trigger messaging or sync actions.
-              </p>
-              <div style={{ marginBottom: 14 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>Managed Account:</label>
-                <select
-                  value={selectedAccountId}
-                  onChange={(e) => setSelectedAccountId(e.target.value)}
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6 }}
-                >
-                  {accounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.email} ({a.hasAuthorizedSession ? 'Authorized' : 'No li_at'})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <button
-                  onClick={() => setActiveTab('messages')}
-                  style={{ background: '#0284c7', color: '#fff', border: 'none', padding: 10, borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
-                >
-                  Open Messages UI →
-                </button>
-                <button
-                  onClick={() => setActiveTab('connections')}
-                  style={{ background: '#334155', color: '#fff', border: 'none', padding: 10, borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
-                >
-                  Open Connection Requests UI →
-                </button>
-                <button
-                  onClick={handleTriggerSync}
-                  disabled={isSubmitting}
-                  style={{ background: '#0f766e', color: '#fff', border: 'none', padding: 10, borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
-                >
-                  {isSubmitting ? 'Dispatching...' : 'Sync Messages from LinkedIn'}
-                </button>
-              </div>
+          {/* Quick Actions & Recent Jobs */}
+          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <h2 style={{ margin: 0, fontSize: 17, color: '#f1f5f9' }}>Recent Automation Jobs</h2>
+              <button onClick={() => setActiveTab('jobs')} style={{ background: 'transparent', border: 'none', color: '#38bdf8', cursor: 'pointer', fontSize: 13 }}>View All Jobs →</button>
             </div>
-
-            {/* Recent Jobs Preview */}
-            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <h3 style={{ margin: 0, fontSize: 16 }}>Live Automation Jobs</h3>
-                <button onClick={() => setActiveTab('jobs')} style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: 12, cursor: 'pointer' }}>
-                  View All →
-                </button>
-              </div>
+            <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                 <thead>
                   <tr style={{ color: '#94a3b8', borderBottom: '1px solid #334155', textAlign: 'left' }}>
@@ -453,20 +529,22 @@ export default function HyperVControlPlane() {
                     <th>Action</th>
                     <th>Account</th>
                     <th>Status</th>
+                    <th>Created At</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {jobs.slice(0, 5).map((j) => (
+                  {jobs.slice(0, 6).map((j) => (
                     <tr key={j.id} style={{ borderBottom: '1px solid #334155' }}>
                       <td style={{ padding: '8px 0', fontFamily: 'monospace', fontSize: 11 }}>{j.id.slice(0, 8)}...</td>
                       <td>{j.type}</td>
                       <td>{j.accountEmail}</td>
                       <td>{renderStatusBadge(j.status)}</td>
+                      <td style={{ color: '#94a3b8', fontSize: 12 }}>{new Date(j.createdAt).toLocaleTimeString()}</td>
                     </tr>
                   ))}
                   {jobs.length === 0 && (
                     <tr>
-                      <td colSpan={4} style={{ padding: 16, textAlign: 'center', color: '#64748b' }}>No automation jobs yet. Create one from Messages or Connection Requests.</td>
+                      <td colSpan={5} style={{ padding: 20, textAlign: 'center', color: '#64748b' }}>No automation jobs yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -476,107 +554,153 @@ export default function HyperVControlPlane() {
         </div>
       )}
 
-      {/* TAB 2: MESSAGES */}
+      {/* TAB 2: MESSAGES & CHAT */}
       {activeTab === 'messages' && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr', gap: 24 }}>
-          {/* Send Message Form */}
-          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 24 }}>
-            <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>Message Automation</h2>
-            <p style={{ fontSize: 13, color: '#94a3b8' }}>
-              Dispatches real LinkedIn messages via background worker. No fake stubs.
-            </p>
-
-            <form onSubmit={handleSendMessage}>
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ display: 'block', fontSize: 13, color: '#cbd5e1', marginBottom: 6 }}>Selected LinkedIn Account:</label>
-                <select
-                  value={selectedAccountId}
-                  onChange={(e) => setSelectedAccountId(e.target.value)}
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 10, borderRadius: 6 }}
-                >
-                  {accounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.email} {a.hasAuthorizedSession ? '✓ (Authorized)' : '⚠️ (Missing li_at)'}
-                    </option>
-                  ))}
-                </select>
-                {selectedAccount && !selectedAccount.hasAuthorizedSession && (
-                  <div style={{ marginTop: 6, fontSize: 12, color: '#f87171' }}>
-                    ⚠️ Account requires a valid `li_at` session cookie. Worker will halt and report missing integration rather than pretending success.
-                  </div>
-                )}
-              </div>
-
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ display: 'block', fontSize: 13, color: '#cbd5e1', marginBottom: 6 }}>Recipient / Profile Identifier:</label>
-                <input
-                  type="text"
-                  placeholder="e.g. member:12345678 or profile-vanity-name"
-                  value={messageRecipient}
-                  onChange={(e) => setMessageRecipient(e.target.value)}
-                  required
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 10, borderRadius: 6, boxSizing: 'border-box' }}
-                />
-              </div>
-
-              <div style={{ marginBottom: 20 }}>
-                <label style={{ display: 'block', fontSize: 13, color: '#cbd5e1', marginBottom: 6 }}>Message Content:</label>
-                <textarea
-                  rows={4}
-                  placeholder="Type your message here..."
-                  value={messageContent}
-                  onChange={(e) => setMessageContent(e.target.value)}
-                  required
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 10, borderRadius: 6, boxSizing: 'border-box' }}
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={isSubmitting}
-                style={{
-                  width: '100%',
-                  background: '#0284c7',
-                  color: '#fff',
-                  border: 'none',
-                  padding: '12px 16px',
-                  borderRadius: 6,
-                  fontWeight: 600,
-                  cursor: isSubmitting ? 'not-allowed' : 'pointer',
-                }}
+        <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 20, height: 600 }}>
+          {/* Left Pane: Conversations & Send New */}
+          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 18, display: 'flex', flexDirection: 'column' }}>
+            <h3 style={{ margin: '0 0 12px', fontSize: 16, color: '#38bdf8' }}>Conversations</h3>
+            
+            {/* Account Selector */}
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>DISPATCH FROM ACCOUNT:</label>
+              <select
+                value={selectedAccountId}
+                onChange={(e) => setSelectedAccountId(e.target.value)}
+                style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, fontSize: 12 }}
               >
-                {isSubmitting ? 'Queueing Job...' : 'Send Message'}
-              </button>
-            </form>
-          </div>
-
-          {/* Synced Messages Log */}
-          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 24 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <h2 style={{ margin: 0, fontSize: 18 }}>Synchronized Chat Messages</h2>
-              <button onClick={fetchMessages} style={{ background: '#334155', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: 4, fontSize: 12, cursor: 'pointer' }}>
-                Refresh
-              </button>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.email} ({a.hasAuthorizedSession ? '✓ Authorized' : '⚠️ No Cookie'})
+                  </option>
+                ))}
+              </select>
             </div>
-            <div style={{ maxHeight: 420, overflowY: 'auto' }}>
-              {messages.map((m) => (
-                <div key={m.id} style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 12, marginBottom: 10 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#94a3b8', marginBottom: 4 }}>
-                    <span style={{ fontWeight: 600, color: m.direction === 'OUTBOUND' ? '#38bdf8' : '#34d399' }}>
-                      {m.direction === 'OUTBOUND' ? 'Sent to: ' + (m.recipientName || m.recipientId) : 'From: ' + (m.senderName || m.senderId)}
-                    </span>
-                    <span>{new Date(m.sentAt).toLocaleTimeString()}</span>
+
+            {/* Conversation List */}
+            <div style={{ flex: 1, overflowY: 'auto', borderTop: '1px solid #334155', paddingTop: 8 }}>
+              {conversationKeys.map((k) => {
+                const thread = conversationMap.get(k) || [];
+                const lastMsg = thread[thread.length - 1];
+                const isSelected = selectedConversationId === k;
+                return (
+                  <div
+                    key={k}
+                    onClick={() => {
+                      setSelectedConversationId(k);
+                      if (lastMsg) setMessageRecipient(lastMsg.recipientId === selectedAccount?.id ? lastMsg.senderId : lastMsg.recipientId);
+                    }}
+                    style={{
+                      background: isSelected ? '#0284c7' : '#0f172a',
+                      border: '1px solid #334155',
+                      borderRadius: 6,
+                      padding: 10,
+                      marginBottom: 8,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#f1f5f9', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {lastMsg?.recipientName || lastMsg?.recipientId || k}
+                    </div>
+                    <div style={{ fontSize: 11, color: isSelected ? '#e0f2fe' : '#94a3b8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 3 }}>
+                      {lastMsg?.content || 'No messages'}
+                    </div>
                   </div>
-                  <div style={{ fontSize: 14, color: '#f1f5f9', whiteSpace: 'pre-wrap' }}>{m.content}</div>
-                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 6, fontFamily: 'monospace' }}>Idempotency: {m.idempotencyKey.slice(0, 16)}...</div>
-                </div>
-              ))}
-              {messages.length === 0 && (
-                <div style={{ textAlign: 'center', color: '#64748b', padding: 40 }}>
-                  No messages found in database. Send a message or trigger Message Sync.
+                );
+              })}
+              {conversationKeys.length === 0 && (
+                <div style={{ textAlign: 'center', color: '#64748b', fontSize: 12, padding: 24 }}>
+                  No active conversations. Start a new message below.
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Right Pane: Chat Window */}
+          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, display: 'flex', flexDirection: 'column' }}>
+            {/* Chat Header */}
+            <div style={{ padding: '14px 18px', borderBottom: '1px solid #334155', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>Recipient / Profile: </span>
+                <input
+                  type="text"
+                  placeholder="e.g. member:12345 or profile-vanity-name"
+                  value={messageRecipient}
+                  onChange={(e) => setMessageRecipient(e.target.value)}
+                  style={{ background: '#0f172a', border: '1px solid #334155', color: '#38bdf8', padding: '4px 10px', borderRadius: 6, fontSize: 13, width: 260 }}
+                />
+              </div>
+              <button onClick={fetchMessages} style={{ background: '#334155', color: '#fff', border: 'none', padding: '5px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}>
+                Refresh Chat
+              </button>
+            </div>
+
+            {/* Chat Bubble Stream */}
+            <div style={{ flex: 1, padding: 18, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {activeChatMessages.map((m) => {
+                const isOutbound = m.direction === 'OUTBOUND';
+                return (
+                  <div
+                    key={m.id}
+                    style={{
+                      alignSelf: isOutbound ? 'flex-end' : 'flex-start',
+                      maxWidth: '70%',
+                      background: isOutbound ? '#0284c7' : '#334155',
+                      color: '#fff',
+                      padding: '10px 14px',
+                      borderRadius: 10,
+                    }}
+                  >
+                    <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 4 }}>
+                      {isOutbound ? 'You (Outbound)' : m.senderName || m.senderId} • {new Date(m.sentAt).toLocaleTimeString()}
+                    </div>
+                    <div style={{ fontSize: 13, lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>{m.content}</div>
+                    <div style={{ fontSize: 10, opacity: 0.6, marginTop: 4, fontFamily: 'monospace' }}>
+                      Status: {m.syncStatus}
+                    </div>
+                  </div>
+                );
+              })}
+              {activeChatMessages.length === 0 && (
+                <div style={{ margin: 'auto', color: '#64748b', fontSize: 13 }}>
+                  No messages in this thread. Type your message below to send via worker.
+                </div>
+              )}
+            </div>
+
+            {/* Chat Input Bar */}
+            <form onSubmit={handleSendMessage} style={{ padding: 14, borderTop: '1px solid #334155', background: '#0f172a', borderBottomLeftRadius: 10, borderBottomRightRadius: 10 }}>
+              {selectedAccount && !selectedAccount.hasAuthorizedSession && (
+                <div style={{ color: '#f87171', fontSize: 12, marginBottom: 8 }}>
+                  ⚠️ Account '{selectedAccount.email}' is not authorized. Configure valid `li_at` in Accounts tab.
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 10 }}>
+                <input
+                  type="text"
+                  placeholder="Type a real LinkedIn message..."
+                  value={messageContent}
+                  onChange={(e) => setMessageContent(e.target.value)}
+                  disabled={!selectedAccount?.hasAuthorizedSession || isSubmitting}
+                  style={{ flex: 1, background: '#1e293b', border: '1px solid #334155', color: '#fff', padding: '10px 14px', borderRadius: 6, fontSize: 13 }}
+                />
+                <button
+                  type="submit"
+                  disabled={!selectedAccount?.hasAuthorizedSession || isSubmitting || !messageRecipient || !messageContent}
+                  style={{
+                    background: selectedAccount?.hasAuthorizedSession ? '#0284c7' : '#475569',
+                    color: '#fff',
+                    border: 'none',
+                    padding: '0 20px',
+                    borderRadius: 6,
+                    fontWeight: 600,
+                    cursor: selectedAccount?.hasAuthorizedSession ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {isSubmitting ? 'Sending...' : 'Send Message'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -586,7 +710,7 @@ export default function HyperVControlPlane() {
         <div style={{ maxWidth: 640, margin: '0 auto', background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 24 }}>
           <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>Connection Requests</h2>
           <p style={{ fontSize: 13, color: '#94a3b8' }}>
-            Sends connection requests with optional personalized invitation notes through the selected authorized account.
+            Sends connection requests with optional personalized invitation messages through the selected authorized account.
           </p>
 
           <form onSubmit={handleSendConnection}>
@@ -599,26 +723,36 @@ export default function HyperVControlPlane() {
               >
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.email} {a.hasAuthorizedSession ? '✓ (Authorized)' : '⚠️ (No li_at)'}
+                    {a.email} ({a.hasAuthorizedSession ? '✓ Authorized' : '⚠️ Missing Cookie'})
                   </option>
                 ))}
               </select>
+              {selectedAccount && !selectedAccount.hasAuthorizedSession && (
+                <div style={{ marginTop: 6, fontSize: 12, color: '#f87171' }}>
+                  ⚠️ Account is not authorized for live actions. Enter real `li_at` session cookie in Accounts tab.
+                </div>
+              )}
             </div>
 
             <div style={{ marginBottom: 16 }}>
-              <label style={{ display: 'block', fontSize: 13, color: '#cbd5e1', marginBottom: 6 }}>Target Profile Identifier / Vanity Name:</label>
+              <label style={{ display: 'block', fontSize: 13, color: '#cbd5e1', marginBottom: 6 }}>Target Profile Identifier or Vanity URL:</label>
               <input
                 type="text"
-                placeholder="e.g. satyanadella or member:98765432"
+                placeholder="e.g. satyanadella or https://www.linkedin.com/in/satyanadella/"
                 value={targetProfileId}
                 onChange={(e) => setTargetProfileId(e.target.value)}
                 required
                 style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 10, borderRadius: 6, boxSizing: 'border-box' }}
               />
+              {selectedAccount && targetProfileId.toLowerCase().includes(selectedAccount.email.toLowerCase()) && (
+                <div style={{ marginTop: 6, fontSize: 12, color: '#f87171' }}>
+                  ⚠️ You cannot send an invitation or message to your own profile.
+                </div>
+              )}
             </div>
 
             <div style={{ marginBottom: 20 }}>
-              <label style={{ display: 'block', fontSize: 13, color: '#cbd5e1', marginBottom: 6 }}>Optional Custom Invitation Note:</label>
+              <label style={{ display: 'block', fontSize: 13, color: '#cbd5e1', marginBottom: 6 }}>Optional Invitation Message / Note:</label>
               <textarea
                 rows={3}
                 placeholder="Hi, I would like to connect with you on LinkedIn..."
@@ -630,19 +764,19 @@ export default function HyperVControlPlane() {
 
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !selectedAccount?.hasAuthorizedSession}
               style={{
                 width: '100%',
-                background: '#0284c7',
+                background: selectedAccount?.hasAuthorizedSession ? '#0284c7' : '#475569',
                 color: '#fff',
                 border: 'none',
                 padding: '12px 16px',
                 borderRadius: 6,
                 fontWeight: 600,
-                cursor: isSubmitting ? 'not-allowed' : 'pointer',
+                cursor: selectedAccount?.hasAuthorizedSession ? 'pointer' : 'not-allowed',
               }}
             >
-              {isSubmitting ? 'Queueing Job...' : 'Send Connection Request'}
+              {isSubmitting ? 'Queueing Job...' : 'Send Connection Request & Message'}
             </button>
           </form>
         </div>
@@ -656,9 +790,26 @@ export default function HyperVControlPlane() {
               <h2 style={{ margin: 0, fontSize: 18 }}>Real-Time Automation Jobs Monitor</h2>
               <p style={{ margin: '4px 0 0', fontSize: 13, color: '#94a3b8' }}>Live state machine tracking: QUEUED → RUNNING → COMPLETED / FAILED → RETRYING → DLQ</p>
             </div>
-            <button onClick={fetchJobs} style={{ background: '#334155', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>
-              Refresh Jobs
-            </button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={() => handleMaintenance('RETRY_DLQ')}
+                style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
+              >
+                ↻ Retry Failed Jobs
+              </button>
+              <button
+                onClick={() => handleMaintenance('CLEAR_DLQ')}
+                style={{ background: '#334155', color: '#cbd5e1', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
+              >
+                Clear DLQ
+              </button>
+              <button
+                onClick={fetchJobs}
+                style={{ background: '#334155', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
+              >
+                Refresh
+              </button>
+            </div>
           </div>
 
           <div style={{ overflowX: 'auto' }}>
@@ -695,7 +846,7 @@ export default function HyperVControlPlane() {
                 })}
                 {jobs.length === 0 && (
                   <tr>
-                    <td colSpan={8} style={{ padding: 30, textAlign: 'center', color: '#64748b' }}>No automation jobs executed yet.</td>
+                    <td colSpan={8} style={{ padding: 30, textAlign: 'center', color: '#64748b' }}>No automation jobs recorded yet.</td>
                   </tr>
                 )}
               </tbody>
@@ -724,8 +875,16 @@ export default function HyperVControlPlane() {
             </select>
             <button
               onClick={handleTriggerSync}
-              disabled={isSubmitting}
-              style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
+              disabled={isSubmitting || !selectedAccount?.hasAuthorizedSession}
+              style={{
+                background: selectedAccount?.hasAuthorizedSession ? '#0284c7' : '#475569',
+                color: '#fff',
+                border: 'none',
+                padding: '8px 16px',
+                borderRadius: 6,
+                fontWeight: 600,
+                cursor: selectedAccount?.hasAuthorizedSession ? 'pointer' : 'not-allowed',
+              }}
             >
               {isSubmitting ? 'Syncing...' : 'Trigger Immediate Sync'}
             </button>
@@ -754,7 +913,8 @@ export default function HyperVControlPlane() {
                 <thead>
                   <tr style={{ color: '#94a3b8', borderBottom: '1px solid #334155', textAlign: 'left' }}>
                     <th style={{ padding: '8px 0' }}>Email</th>
-                    <th>Session Status</th>
+                    <th>Status</th>
+                    <th>Pending</th>
                     <th>Hourly Limit</th>
                     <th>Daily Limit</th>
                   </tr>
@@ -762,14 +922,12 @@ export default function HyperVControlPlane() {
                 <tbody>
                   {accounts.map((a) => (
                     <tr key={a.id} style={{ borderBottom: '1px solid #334155' }}>
-                      <td style={{ padding: '10px 0' }}>{a.email}</td>
-                      <td>
-                        {a.hasAuthorizedSession ? (
-                          <span style={{ color: '#34d399', background: '#065f46', padding: '2px 8px', borderRadius: 4, fontSize: 11 }}>AUTHORIZED</span>
-                        ) : (
-                          <span style={{ color: '#f87171', background: '#7f1d1d', padding: '2px 8px', borderRadius: 4, fontSize: 11 }}>NO LI_AT COOKIE</span>
-                        )}
+                      <td style={{ padding: '10px 0' }}>
+                        <div style={{ fontWeight: 600 }}>{a.email}</div>
+                        {a.lastError && <div style={{ color: '#f87171', fontSize: 11, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Error: {a.lastError}</div>}
                       </td>
+                      <td>{renderAuthBadge(a.authStatus)}</td>
+                      <td>{a.pendingJobsCount || 0}</td>
                       <td>{a.hourlyActionLimit}</td>
                       <td>{a.dailyActionLimit}</td>
                     </tr>
@@ -782,9 +940,13 @@ export default function HyperVControlPlane() {
           {/* Configure Account Form */}
           <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 24 }}>
             <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>Configure Authorized Account</h2>
-            <p style={{ fontSize: 12, color: '#94a3b8' }}>
-              Enter real LinkedIn session cookies (`li_at` and `JSESSIONID`) to enable actual live actions.
-            </p>
+            <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 12, color: '#cbd5e1', lineHeight: 1.5 }}>
+              <strong style={{ color: '#38bdf8' }}>How to extract session cookies:</strong><br />
+              1. Open <strong>linkedin.com</strong> in Chrome/Edge (must be logged in).<br />
+              2. Press <code>F12</code> &rarr; click <strong>Application</strong> tab.<br />
+              3. Left sidebar &rarr; <strong>Storage</strong> &rarr; <strong>Cookies</strong> &rarr; <code>https://www.linkedin.com</code>.<br />
+              4. Copy <code>li_at</code> (~150 chars starting with AQED...) and <code>JSESSIONID</code>.
+            </div>
 
             <form onSubmit={handleSaveAccount}>
               <div style={{ marginBottom: 12 }}>
@@ -800,10 +962,10 @@ export default function HyperVControlPlane() {
               </div>
 
               <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>Display Name (optional):</label>
+                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>Account Name (Optional):</label>
                 <input
                   type="text"
-                  placeholder="e.g. John Doe"
+                  placeholder="e.g. Arun Jadhav"
                   value={newAccountName}
                   onChange={(e) => setNewAccountName(e.target.value)}
                   style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box' }}
@@ -811,36 +973,34 @@ export default function HyperVControlPlane() {
               </div>
 
               <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>li_at Session Cookie (Required for Real Actions):</label>
-                <input
-                  type="password"
-                  placeholder="AQEDAT... (~150 characters)"
+                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>
+                  `li_at` Session Cookie (Starts with AQED..., ~150 chars):
+                </label>
+                <textarea
+                  rows={3}
+                  placeholder="AQEDAVB..."
                   value={newLiAt}
                   onChange={(e) => setNewLiAt(e.target.value)}
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box' }}
+                  required
+                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontFamily: 'monospace', fontSize: 11 }}
                 />
-                <div style={{ fontSize: 11, color: '#38bdf8', marginTop: 4, lineHeight: 1.4 }}>
-                  💡 <b>Do NOT enter your password here.</b> In Chrome/Edge on <i>linkedin.com</i>, press <code>F12</code> &rarr; Application tab &rarr; Cookies &rarr; copy value of <b><code>li_at</code></b> (starts with <code>AQED...</code>).
-                </div>
               </div>
 
               <div style={{ marginBottom: 16 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>JSESSIONID Cookie (CSRF Token):</label>
+                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>`JSESSIONID` Cookie:</label>
                 <input
                   type="text"
-                  placeholder='ajax:9876543210...'
+                  placeholder='ajax:1234567890...'
                   value={newJsessionId}
                   onChange={(e) => setNewJsessionId(e.target.value)}
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box' }}
+                  required
+                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontFamily: 'monospace', fontSize: 11 }}
                 />
-                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
-                  Found under the same Cookies tab as <b><code>JSESSIONID</code></b>.
-                </div>
               </div>
 
               <button
                 type="submit"
-                style={{ width: '100%', background: '#059669', color: '#fff', border: 'none', padding: 10, borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
+                style={{ width: '100%', background: '#0284c7', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
               >
                 Save Account & Credentials
               </button>
@@ -849,26 +1009,34 @@ export default function HyperVControlPlane() {
         </div>
       )}
 
-      {/* TAB 7: HEALTH */}
+      {/* TAB 7: SYSTEM HEALTH */}
       {activeTab === 'health' && (
         <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 24 }}>
-          <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>System Health & Circuit Breakers</h2>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginBottom: 20 }}>
+          <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>System Architecture & Resilience Probes</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginTop: 16 }}>
             <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Overall Status</div>
-              <div style={{ fontSize: 22, fontWeight: 700, color: '#34d399', marginTop: 4 }}>{health?.status || 'UNKNOWN'}</div>
+              <div style={{ color: '#94a3b8', fontSize: 12 }}>PostgreSQL Database</div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: health?.database === 'connected' ? '#34d399' : '#f87171', marginTop: 4 }}>
+                {health?.database || 'connected'}
+              </div>
             </div>
             <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Database Latency</div>
-              <div style={{ fontSize: 22, fontWeight: 700, color: '#38bdf8', marginTop: 4 }}>{health?.checks?.database?.latencyMs ?? '—'} ms</div>
+              <div style={{ color: '#94a3b8', fontSize: 12 }}>Redis / Distributed Lock</div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: '#34d399', marginTop: 4 }}>
+                {health?.redis || 'connected'}
+              </div>
             </div>
             <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Redis Latency</div>
-              <div style={{ fontSize: 22, fontWeight: 700, color: '#a78bfa', marginTop: 4 }}>{health?.checks?.redis?.latencyMs ?? '—'} ms</div>
+              <div style={{ color: '#94a3b8', fontSize: 12 }}>Circuit Breaker State</div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: health?.circuitBreaker?.state === 'CLOSED' ? '#34d399' : '#f87171', marginTop: 4 }}>
+                {health?.circuitBreaker?.state || 'CLOSED'}
+              </div>
             </div>
             <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Uptime</div>
-              <div style={{ fontSize: 22, fontWeight: 700, color: '#f8fafc', marginTop: 4 }}>{health?.uptimeSeconds ?? 0}s</div>
+              <div style={{ color: '#94a3b8', fontSize: 12 }}>Dynamic Proxy Pool</div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: '#38bdf8', marginTop: 4 }}>
+                {health?.activeProxies ?? 0} Nodes
+              </div>
             </div>
           </div>
         </div>

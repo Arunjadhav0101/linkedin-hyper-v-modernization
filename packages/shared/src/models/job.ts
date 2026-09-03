@@ -11,8 +11,10 @@ export type JobStatus =
   | 'RUNNING'
   | 'COMPLETED'
   | 'FAILED'
+  | 'RETRYING'
   | 'RATE_LIMITED'
   | 'DLQ_ROUTED'
+  | 'TIMED_OUT'
   | 'CANCELLED';
 
 export interface AutomationTask<T = Record<string, unknown>> {

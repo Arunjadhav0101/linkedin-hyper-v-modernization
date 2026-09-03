@@ -6,6 +6,7 @@ import { CircuitBreaker } from '../circuit/CircuitBreaker.js';
 import { DeadLetterQueueManager } from '../events/DeadLetterQueue.js';
 import { PersistenceConsumer } from '../events/PersistenceConsumer.js';
 import { logger } from '../observability/logger.js';
+import { ErrorClassifier } from '../errors/ErrorClassifier.js';
 import { LinkedInAccount } from '@shared/types';
 
 export class JobProcessor {
@@ -41,13 +42,30 @@ export class JobProcessor {
   public async processNextPendingJob(): Promise<boolean> {
     const now = new Date();
 
-    // Look for pending QUEUED jobs or FAILED jobs whose backoff scheduledFor has arrived
+    // Clean up jobs that have been RUNNING for more than 60 seconds (timed out)
+    try {
+      await this.prisma.automationJob.updateMany({
+        where: {
+          status: 'RUNNING',
+          startedAt: { lte: new Date(Date.now() - 60000) },
+        },
+        data: {
+          status: 'TIMED_OUT',
+          errorMessage: 'Job execution exceeded 60s timeout threshold',
+          completedAt: new Date(),
+        },
+      });
+    } catch {
+      // Best-effort timeout check
+    }
+
+    // Look for pending QUEUED jobs or RETRYING jobs whose backoff scheduledFor has arrived
     const job = await this.prisma.automationJob.findFirst({
       where: {
         OR: [
           { status: 'QUEUED' },
           {
-            status: 'FAILED',
+            status: 'RETRYING',
             retryCount: { lt: 5 },
             scheduledFor: { lte: now },
           },
@@ -99,9 +117,24 @@ export class JobProcessor {
       include: { assignedProxy: true },
     });
 
+    if (job.status === 'CANCELLED') {
+      logger.info({ jobId: job.id }, 'Skipping execution of cancelled job');
+      return;
+    }
+
     if (!accountRecord) {
       const err = `LinkedIn account '${job.accountId}' was not found in database`;
       logger.error({ jobId: job.id, accountId: job.accountId }, err);
+      await this.markJobFailed(job, new Error(err), false);
+      return;
+    }
+
+    // Pre-flight authorization validation: Fail immediately if account is not authorized for live actions
+    const accountCookies = (accountRecord.cookies as Record<string, string>) || {};
+    const liAt = (accountCookies.li_at || accountCookies['li_at'] || '').trim();
+    if (!liAt || liAt.length < 50) {
+      const err = `Account is not authorized for live actions. Missing or invalid 'li_at' session cookie.`;
+      logger.warn({ jobId: job.id, accountId: job.accountId }, err);
       await this.markJobFailed(job, new Error(err), false);
       return;
     }
@@ -115,7 +148,7 @@ export class JobProcessor {
       status: accountRecord.status as any,
       proxySessionId: accountRecord.proxySessionId ?? undefined,
       assignedProxyId: accountRecord.assignedProxyId ?? undefined,
-      cookies: (accountRecord.cookies as Record<string, string>) ?? {},
+      cookies: accountCookies,
       warmupStartDate: accountRecord.warmupStartDate,
       isWarmedUp: accountRecord.isWarmedUp,
       limits: {
@@ -174,7 +207,8 @@ export class JobProcessor {
 
       logger.info({ jobId: job.id, action: job.type }, 'Automation job successfully completed');
     } catch (err: any) {
-      await this.markJobFailed(job, err, true);
+      const isPermanent = ErrorClassifier.isPermanent(err);
+      await this.markJobFailed(job, err, !isPermanent);
     }
   }
 
@@ -391,6 +425,41 @@ export class JobProcessor {
    * Handles failure with retry scheduling, exponential backoff, and DLQ routing
    */
   private async markJobFailed(job: any, err: Error, retryable: boolean): Promise<void> {
+    if (!retryable) {
+      // Permanent non-retryable failure (e.g. invalid credentials, 4xx client errors, validation errors)
+      logger.warn(
+        {
+          jobId: job.id,
+          action: job.type,
+          error: err.message,
+          retryCount: job.retryCount,
+        },
+        'Permanent job failure encountered; terminating without retries'
+      );
+
+      await this.prisma.automationJob.update({
+        where: { id: job.id },
+        data: {
+          status: 'FAILED',
+          errorMessage: err.message,
+          completedAt: new Date(),
+        },
+      });
+
+      await this.eventBus.publish(
+        'AUTOMATION_JOB_FAILED',
+        {
+          jobId: job.id,
+          accountId: job.accountId,
+          type: job.type,
+          error: err.message,
+          retryCount: job.retryCount,
+        },
+        job.traceId
+      );
+      return;
+    }
+
     const newRetryCount = job.retryCount + 1;
     const isExhausted = newRetryCount >= job.maxRetries;
 
@@ -403,17 +472,18 @@ export class JobProcessor {
         maxRetries: job.maxRetries,
         isExhausted,
       },
-      'Job execution failed'
+      'Transient job execution failure'
     );
 
-    if (isExhausted || !retryable) {
-      // Exceeded max retries or permanent non-retryable error -> Route to DLQ
+    if (isExhausted) {
+      // Exceeded max retries -> Route to DLQ
       await this.prisma.automationJob.update({
         where: { id: job.id },
         data: {
-          status: isExhausted ? 'DLQ_ROUTED' : 'FAILED',
+          status: 'DLQ_ROUTED',
           errorMessage: err.message,
           retryCount: newRetryCount,
+          completedAt: new Date(),
         },
       });
 
@@ -448,14 +518,14 @@ export class JobProcessor {
         job.traceId
       );
     } else {
-      // Calculate exponential backoff with jitter
+      // Calculate exponential backoff with jitter and mark RETRYING
       const backoffMs = DeadLetterQueueManager.calculateBackoff(newRetryCount);
       const nextScheduled = new Date(Date.now() + backoffMs);
 
       await this.prisma.automationJob.update({
         where: { id: job.id },
         data: {
-          status: 'FAILED',
+          status: 'RETRYING',
           errorMessage: err.message,
           retryCount: newRetryCount,
           scheduledFor: nextScheduled,
@@ -463,7 +533,7 @@ export class JobProcessor {
       });
 
       logger.info(
-        { jobId: job.id, backoffMs, nextScheduled: nextScheduled.toISOString() },
+        { jobId: job.id, backoffMs, nextScheduled: nextScheduled.toISOString(), attempt: newRetryCount },
         'Job scheduled for exponential retry'
       );
     }

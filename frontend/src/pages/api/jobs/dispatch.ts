@@ -51,6 +51,20 @@ export default async function handler(
     });
   }
 
+  // Pre-flight validation: Ensure account has an authorized session before creating jobs
+  const cookies = (account.cookies as Record<string, string>) || {};
+  const liAt = (cookies.li_at || '').trim();
+  if (!liAt || liAt.length < 50) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'ACCOUNT_NOT_AUTHORIZED',
+        message: 'Account is not authorized for live actions. Please configure a valid session cookie in the Accounts tab.',
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   // Create real AutomationJob in PostgreSQL
   const traceId = randomUUID();
   const job = await prisma.automationJob.create({

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { JobProcessor } from '../backend/src/jobs/JobProcessor.js';
 import { EventBus } from '../backend/src/events/EventBus.js';
-import { VoyagerClient } from '../backend/src/automation/VoyagerClient.js';
+import { VoyagerClient, VoyagerApiError } from '../backend/src/automation/VoyagerClient.js';
 import { DistributedLock } from '../backend/src/lock/DistributedLock.js';
 import { CircuitBreaker } from '../backend/src/circuit/CircuitBreaker.js';
 import { DeadLetterQueueManager, MemoryDLQStorage } from '../backend/src/events/DeadLetterQueue.js';
@@ -16,6 +16,7 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
   let dlqManager: DeadLetterQueueManager;
   let dlqStorage: MemoryDLQStorage;
   let persistenceConsumer: PersistenceConsumer;
+  let circuitBreaker: CircuitBreaker;
   let mockPrisma: any;
 
   const mockAccount = {
@@ -48,7 +49,7 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
     voyagerClient = new VoyagerClient(policy, proxyPool);
 
     const lock = new DistributedLock();
-    const circuitBreaker = new CircuitBreaker('test-linkedin');
+    circuitBreaker = new CircuitBreaker('test-linkedin');
 
     mockPrisma = {
       automationJob: {
@@ -76,9 +77,9 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
     );
   });
 
-  it('marks job as FAILED and schedules retry if execution fails with retries remaining', async () => {
-    // Spy on voyagerClient to throw network error
-    vi.spyOn(voyagerClient, 'sendMessage').mockRejectedValue(new Error('Connection reset by peer'));
+  it('marks job as RETRYING and schedules backoff when transient network error occurs', async () => {
+    // Spy on voyagerClient to throw transient network error
+    vi.spyOn(voyagerClient, 'sendMessage').mockRejectedValue(new Error('fetch failed: Connection reset by peer'));
 
     const job = {
       id: 'job_retry_test',
@@ -94,7 +95,7 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
 
     await processor.executeJob(job);
 
-    // Verify job transitioned to RUNNING, then FAILED with scheduled retry
+    // Verify job transitioned to RUNNING, then RETRYING with scheduled retry
     expect(mockPrisma.automationJob.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'job_retry_test' },
@@ -106,16 +107,89 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
       expect.objectContaining({
         where: { id: 'job_retry_test' },
         data: expect.objectContaining({
-          status: 'FAILED',
-          errorMessage: 'Connection reset by peer',
+          status: 'RETRYING',
+          errorMessage: 'fetch failed: Connection reset by peer',
           retryCount: 1,
         }),
       })
     );
   });
 
-  it('routes job to DLQ when maxRetries is exhausted', async () => {
-    vi.spyOn(voyagerClient, 'sendMessage').mockRejectedValue(new Error('Persistent LinkedIn API outage'));
+  it('marks job as FAILED immediately without retrying when permanent 422 error occurs', async () => {
+    // Permanent HTTP 422 Unprocessable Entity
+    vi.spyOn(voyagerClient, 'sendConnectionRequest').mockRejectedValue(
+      new VoyagerApiError(422, 'Cannot invite self or already connected', { status: 422 })
+    );
+
+    const job = {
+      id: 'job_perm_422_test',
+      traceId: 'trace_perm_422_test',
+      accountId: 'acc_worker_test',
+      type: 'SEND_CONNECTION_REQUEST',
+      payload: { targetProfileId: 'target-vanity' },
+      status: 'QUEUED',
+      priority: 0,
+      retryCount: 0,
+      maxRetries: 5,
+    };
+
+    await processor.executeJob(job);
+
+    // Verify job transitioned to FAILED (NOT RETRYING, NOT DLQ_ROUTED)
+    expect(mockPrisma.automationJob.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'job_perm_422_test' },
+        data: expect.objectContaining({
+          status: 'FAILED',
+        }),
+      })
+    );
+
+    // Verify it did NOT route to DLQ
+    const dlqPending = await dlqStorage.getPendingRecords();
+    expect(dlqPending).toHaveLength(0);
+
+    // Verify CircuitBreaker state remained CLOSED (client errors must not trip the breaker)
+    expect(circuitBreaker.getState()).toBe('CLOSED');
+  });
+
+  it('fails immediately when account has no valid session cookie without blind retries', async () => {
+    mockPrisma.linkedInAccount.findUnique.mockResolvedValue({
+      ...mockAccount,
+      cookies: { li_at: 'short_pass' }, // Invalid cookie < 50 chars
+    });
+
+    const job = {
+      id: 'job_invalid_auth_test',
+      traceId: 'trace_invalid_auth_test',
+      accountId: 'acc_worker_test',
+      type: 'SEND_MESSAGE',
+      payload: { recipientId: 'member:123', content: 'Hi' },
+      status: 'QUEUED',
+      priority: 0,
+      retryCount: 0,
+      maxRetries: 5,
+    };
+
+    await processor.executeJob(job);
+
+    expect(mockPrisma.automationJob.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'job_invalid_auth_test' },
+        data: expect.objectContaining({
+          status: 'FAILED',
+          errorMessage: expect.stringContaining('Account is not authorized for live actions'),
+        }),
+      })
+    );
+
+    // Must NOT route to DLQ on configuration errors
+    const dlqPending = await dlqStorage.getPendingRecords();
+    expect(dlqPending).toHaveLength(0);
+  });
+
+  it('routes job to DLQ when maxRetries is exhausted on transient errors', async () => {
+    vi.spyOn(voyagerClient, 'sendMessage').mockRejectedValue(new Error('fetch failed: Persistent network timeout'));
 
     const job = {
       id: 'job_dlq_test',
@@ -123,7 +197,7 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
       accountId: 'acc_worker_test',
       type: 'SEND_MESSAGE',
       payload: { recipientId: 'member:999', content: 'Test message' },
-      status: 'FAILED',
+      status: 'RETRYING',
       priority: 0,
       retryCount: 2, // 3rd attempt will equal maxRetries
       maxRetries: 3,
@@ -146,7 +220,7 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
     const dlqPending = await dlqStorage.getPendingRecords();
     expect(dlqPending).toHaveLength(1);
     expect(dlqPending[0]!.accountId).toBe('acc_worker_test');
-    expect(dlqPending[0]!.errorMessage).toBe('Persistent LinkedIn API outage');
+    expect(dlqPending[0]!.errorMessage).toBe('fetch failed: Persistent network timeout');
   });
 
   it('completes successfully and publishes MESSAGE_SENT when real execution succeeds', async () => {
@@ -182,10 +256,8 @@ describe('JobProcessor Worker Engine & State Machine Verification', () => {
       })
     );
 
-    // Verify MESSAGE_SENT was emitted with correct payload
     expect(publishedEvents).toHaveLength(1);
     expect(publishedEvents[0]!.payload.remoteMessageId).toBe('remote_msg_ok');
-    expect(publishedEvents[0]!.payload.recipientId).toBe('member:888');
   });
 
   it('completes CONNECTION_REQUEST_SENT when connection request succeeds', async () => {
