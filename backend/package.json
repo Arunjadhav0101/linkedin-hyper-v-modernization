@@ -12,6 +12,7 @@
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
+    "@prisma/client": "^5.22.0",
     "@shared/types": "*",
     "ioredis": "^5.3.2",
     "pino": "^8.19.0",

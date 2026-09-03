@@ -22,6 +22,25 @@ export type EventPayloadMap = {
     targetProfileId: string;
     customNote?: string;
   };
+  'AUTOMATION_JOB_CREATED': {
+    jobId: string;
+    accountId: string;
+    type: string;
+    payload: Record<string, unknown>;
+  };
+  'AUTOMATION_JOB_COMPLETED': {
+    jobId: string;
+    accountId: string;
+    type: string;
+    result?: Record<string, unknown>;
+  };
+  'AUTOMATION_JOB_FAILED': {
+    jobId: string;
+    accountId: string;
+    type: string;
+    error: string;
+    retryCount: number;
+  };
   'RATE_LIMIT_TRIGGERED': {
     accountId: string;
     endpoint: string;

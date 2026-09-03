@@ -2,14 +2,6 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { ApiResponse } from '@shared/types';
 import { prisma } from '../../../lib/prisma';
 import { randomUUID } from 'crypto';
-import { z } from 'zod';
-
-const dispatchSchema = z.object({
-  accountId: z.string().min(1, 'Account ID is required'),
-  type: z.enum(['SEND_MESSAGE', 'SEND_CONNECTION_REQUEST', 'SYNC_MESSAGES']),
-  payload: z.record(z.any()),
-  priority: z.number().int().default(0),
-});
 
 export default async function handler(
   req: NextApiRequest,
@@ -24,21 +16,16 @@ export default async function handler(
     });
   }
 
-  const parseResult = dispatchSchema.safeParse(req.body);
-  if (!parseResult.success) {
+  const { accountId, limit = 20 } = req.body || {};
+
+  if (!accountId) {
     return res.status(400).json({
       success: false,
-      error: {
-        code: 'VALIDATION_ERROR',
-        message: parseResult.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join(', '),
-      },
+      error: { code: 'INVALID_PARAMETERS', message: 'accountId is required for synchronization' },
       timestamp: new Date().toISOString(),
     });
   }
 
-  const { accountId, type, payload, priority } = parseResult.data;
-
-  // Verify account exists in database
   const account = await prisma.linkedInAccount.findUnique({
     where: { id: accountId },
   });
@@ -46,21 +33,20 @@ export default async function handler(
   if (!account) {
     return res.status(404).json({
       success: false,
-      error: { code: 'ACCOUNT_NOT_FOUND', message: `LinkedIn Account with ID '${accountId}' was not found` },
+      error: { code: 'ACCOUNT_NOT_FOUND', message: `Account '${accountId}' not found` },
       timestamp: new Date().toISOString(),
     });
   }
 
-  // Create real AutomationJob in PostgreSQL
   const traceId = randomUUID();
   const job = await prisma.automationJob.create({
     data: {
       id: randomUUID(),
       traceId,
       accountId,
-      type,
-      payload,
-      priority,
+      type: 'SYNC_MESSAGES',
+      payload: { limit: parseInt(limit, 10) || 20 },
+      priority: 1,
       status: 'QUEUED',
       scheduledFor: new Date(),
     },
@@ -73,12 +59,8 @@ export default async function handler(
       traceId: job.traceId,
       accountId: job.accountId,
       type: job.type,
-      payload: job.payload,
       status: job.status,
-      priority: job.priority,
-      retryCount: job.retryCount,
       scheduledFor: job.scheduledFor,
-      createdAt: job.createdAt,
     },
     timestamp: new Date().toISOString(),
     traceId,

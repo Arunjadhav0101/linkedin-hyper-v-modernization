@@ -38,7 +38,36 @@ export interface HealthCheckResponse {
 
 export interface DispatchJobRequest {
   accountId: string;
-  type: string;
+  type: 'SEND_MESSAGE' | 'SEND_CONNECTION_REQUEST' | 'SYNC_MESSAGES' | string;
   payload: Record<string, unknown>;
   priority?: number;
+}
+
+export interface SendMessagePayload {
+  recipientId: string;
+  recipientName?: string;
+  conversationId?: string;
+  content: string;
+}
+
+export interface SendConnectionRequestPayload {
+  targetProfileId: string;
+  customNote?: string;
+}
+
+export interface SyncMessagesPayload {
+  since?: string;
+  limit?: number;
+}
+
+export interface CreateAccountDTO {
+  email: string;
+  name?: string;
+  linkedinId?: string;
+  cookies?: {
+    li_at?: string;
+    JSESSIONID?: string;
+    [key: string]: string | undefined;
+  };
+  assignedProxyId?: string;
 }
