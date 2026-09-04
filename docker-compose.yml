@@ -42,25 +42,7 @@ services:
       - hyperv-network
 
   # ---------------------------------------------------------------------------
-  # 3. Database Schema Synchronizer (Prisma db push)
-  # ---------------------------------------------------------------------------
-  db-init:
-    build:
-      context: .
-      dockerfile: deployment/docker/Dockerfile.backend
-    container_name: hyperv-db-init
-    command: ["npx", "prisma", "db", "push", "--schema=database/schema.prisma"]
-    environment:
-      DATABASE_URL: "postgresql://postgres:postgrespassword@postgres:5432/linkedin_hyper_v?schema=public"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - hyperv-network
-    restart: "no"
-
-  # ---------------------------------------------------------------------------
-  # 4. Backend Automation Engine & Outbox Publisher
+  # 3. Python FastAPI Backend Engine & Background Worker
   # ---------------------------------------------------------------------------
   backend:
     build:
@@ -71,24 +53,19 @@ services:
     ports:
       - "8088:8080"
     environment:
-      NODE_ENV: production
-      DATABASE_URL: "postgresql://postgres:postgrespassword@postgres:5432/linkedin_hyper_v?schema=public"
-      REDIS_URL: "redis://redis:6379"
-      HEALTH_PORT: "8080"
-      LOG_LEVEL: info
-      OUTBOX_POLL_INTERVAL_MS: "2000"
+      DATABASE_URL: "postgresql://postgres:postgrespassword@postgres:5432/linkedin_hyper_v"
+      REDIS_URL: "redis://redis:6379/0"
+      PORT: "8080"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
     networks:
       - hyperv-network
 
   # ---------------------------------------------------------------------------
-  # 5. Frontend Next.js Dashboard & Control Plane
+  # 4. Frontend Next.js Dashboard & Control Plane
   # ---------------------------------------------------------------------------
   frontend:
     build:
@@ -100,16 +77,14 @@ services:
       - "3000:3000"
     environment:
       NODE_ENV: production
-      DATABASE_URL: "postgresql://postgres:postgrespassword@postgres:5432/linkedin_hyper_v?schema=public"
       PORT: "3000"
+      BACKEND_API_URL: "http://backend:8080"
       NEXT_PUBLIC_APP_ENV: production
     depends_on:
       postgres:
         condition: service_healthy
       backend:
         condition: service_started
-      db-init:
-        condition: service_completed_successfully
     networks:
       - hyperv-network
 

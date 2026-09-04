@@ -1,31 +1,26 @@
 {
   "name": "linkedin-hyper-v",
   "version": "2.0.0",
-  "description": "Enterprise-grade, type-safe LinkedIn automation and synchronization platform",
+  "description": "LinkedIn Hyper-V Python Automation & Control Plane Platform",
   "private": true,
   "workspaces": [
     "packages/*",
-    "backend",
     "frontend"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "typecheck": "tsc --noEmit --project tsconfig.json && npm run typecheck --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "backend:dev": "npm run dev --workspace=backend",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "python -m pytest backend/tests -v",
+    "backend:dev": "uvicorn backend.app.main:app --reload --port 8080",
     "frontend:dev": "npm run dev --workspace=frontend",
     "prisma:generate": "prisma generate --schema=database/schema.prisma",
-    "prisma:validate": "prisma validate --schema=database/schema.prisma",
-    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\""
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md,py}\""
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
     "prettier": "^3.2.5",
     "prisma": "^5.10.2",
-    "typescript": "^5.3.3",
-    "vitest": "^1.3.1"
+    "typescript": "^5.3.3"
   },
   "engines": {
     "node": ">=20.0.0"

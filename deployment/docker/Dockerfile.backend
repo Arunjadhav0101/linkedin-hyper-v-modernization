@@ -1,40 +1,24 @@
-# Multi-Stage Alpine Dockerfile for Backend Engine
-FROM node:20-alpine AS base
+FROM python:3.12-slim
+
 WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl
 
-# Step 1: Install dependencies
-FROM base AS dependencies
-COPY package.json package-lock.json* ./
-COPY packages/shared/package.json ./packages/shared/
-COPY backend/package.json ./backend/
-COPY frontend/package.json ./frontend/
-COPY database ./database
-RUN npm ci
+# Install system dependencies for psycopg2 and curl
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Step 2: Build the TypeScript backend engine
-FROM base AS builder
-COPY . .
-COPY --from=dependencies /app/node_modules ./node_modules
-ENV DATABASE_URL="postgresql://postgres:password@localhost:5432/linkedin_hyper_v?schema=public"
-RUN npm run build --workspace=@shared/types
-RUN npx prisma generate --schema=database/schema.prisma
-RUN npm run build --workspace=@hyper-v/backend
+# Copy requirements and install
+COPY backend/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Step 3: Production runner with non-root user
-FROM base AS runner
-ENV NODE_ENV=production
+# Copy backend application code
+COPY backend/app ./app
 
-RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 backenduser
-USER backenduser
-
-COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
-COPY --from=builder /app/packages/shared/package.json ./packages/shared/package.json
-COPY --from=builder /app/backend/dist ./backend/dist
-COPY --from=builder /app/backend/package.json ./backend/package.json
-COPY --from=builder /app/database ./database
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
+ENV PYTHONPATH=/app \
+    PORT=8080
 
 EXPOSE 8080
-CMD ["node", "backend/dist/index.js"]
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
