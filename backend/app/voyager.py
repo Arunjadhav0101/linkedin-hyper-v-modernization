@@ -268,10 +268,102 @@ class VoyagerClient:
                 data = resp.json()
                 elements = data.get("elements") or []
                 conversations = []
+
                 for el in elements[:limit]:
                     conv_urn = el.get("entityUrn", "").replace("urn:li:fs_conversation:", "")
+                    
+                    # Extract participants
+                    participants = el.get("participants") or []
+                    partner_name = None
+                    partner_identifier = None
+                    participant_ids = []
+
+                    for p in participants:
+                        member = p.get("com.linkedin.voyager.messaging.MessagingMember") or p
+                        mini = member.get("miniProfile") or member
+                        first_name = mini.get("firstName", "")
+                        last_name = mini.get("lastName", "")
+                        full_name = f"{first_name} {last_name}".strip()
+                        pub_id = mini.get("publicIdentifier") or mini.get("entityUrn", "")
+
+                        if pub_id:
+                            participant_ids.append(pub_id)
+
+                        # Identify conversation partner (not self)
+                        is_self = False
+                        if account.publicIdentifier and pub_id and account.publicIdentifier.lower() in pub_id.lower():
+                            is_self = True
+                        if account.linkedinId and pub_id and account.linkedinId in pub_id:
+                            is_self = True
+
+                        if not is_self and not partner_name:
+                            partner_name = full_name or pub_id
+                            partner_identifier = pub_id
+
+                    if not partner_name:
+                        partner_name = partner_identifier or conv_urn[:16]
+
+                    # Parse message events
                     events = el.get("events") or []
-                    conversations.append({"conversationId": conv_urn, "messages": events})
+                    parsed_messages = []
+                    last_snippet = None
+                    last_activity = None
+
+                    for ev in events:
+                        ev_id = ev.get("backendEventId") or ev.get("entityUrn", "")
+                        
+                        # Body content
+                        event_content = ev.get("eventContent", {})
+                        msg_event = (
+                            event_content.get("com.linkedin.voyager.messaging.event.MessageEvent")
+                            or event_content.get("messageEvent")
+                            or event_content
+                        )
+                        body = (
+                            msg_event.get("body")
+                            or msg_event.get("attributedBody", {}).get("text")
+                            or ev.get("body")
+                            or ""
+                        )
+
+                        # Sender details
+                        from_member = (
+                            ev.get("from", {}).get("com.linkedin.voyager.messaging.MessagingMember")
+                            or ev.get("from", {})
+                        )
+                        from_mini = from_member.get("miniProfile") or from_member
+                        sender_first = from_mini.get("firstName", "")
+                        sender_last = from_mini.get("lastName", "")
+                        sender_name = f"{sender_first} {sender_last}".strip() or from_mini.get("publicIdentifier") or "LinkedIn Member"
+                        sender_id = from_mini.get("publicIdentifier") or from_mini.get("entityUrn", "") or "unknown"
+
+                        created_at_ms = ev.get("createdAt")
+                        sent_dt = None
+                        if created_at_ms and isinstance(created_at_ms, (int, float)):
+                            sent_dt = datetime.utcfromtimestamp(created_at_ms / 1000.0)
+
+                        if ev_id and body:
+                            parsed_messages.append({
+                                "remoteMessageId": ev_id,
+                                "senderId": sender_id,
+                                "senderName": sender_name,
+                                "content": body,
+                                "sentAt": sent_dt,
+                            })
+                            last_snippet = body[:120]
+                            if sent_dt:
+                                last_activity = sent_dt
+
+                    conversations.append({
+                        "conversationId": conv_urn,
+                        "partnerName": partner_name,
+                        "partnerIdentifier": partner_identifier or partner_name,
+                        "participantIds": participant_ids,
+                        "lastMessageSnippet": last_snippet,
+                        "lastActivityAt": last_activity,
+                        "messages": parsed_messages,
+                    })
+
                 return conversations
             except Exception as e:
                 raise VoyagerApiError(500, f"Error parsing conversation stream: {str(e)}")

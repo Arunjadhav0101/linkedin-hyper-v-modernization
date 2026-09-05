@@ -345,14 +345,68 @@ def list_jobs(limit: int = Query(50, ge=1, le=100), db: Session = Depends(get_db
     return {"success": True, "data": data, "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.get("/api/conversations")
+def list_conversations(
+    accountId: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Conversation)
+    if accountId:
+        query = query.filter(Conversation.accountId == accountId)
+    conversations = query.order_by(desc(Conversation.lastActivityAt)).limit(limit).all()
+
+    data = []
+    for c in conversations:
+        # Determine friendly partner name
+        partner_name = None
+        for pid in (c.participantIds or []):
+            if pid != c.accountId and not pid.startswith("acc_"):
+                partner_name = pid
+                break
+        if not partner_name:
+            partner_name = c.remoteConversationId[:16]
+
+        msg_count = db.query(ChatMessage).filter(ChatMessage.conversationId == c.id).count()
+
+        data.append({
+            "id": c.id,
+            "accountId": c.accountId,
+            "remoteConversationId": c.remoteConversationId,
+            "partnerName": partner_name,
+            "participantIds": c.participantIds or [],
+            "lastMessageSnippet": c.lastMessageSnippet or "No messages yet",
+            "lastActivityAt": c.lastActivityAt.isoformat() if c.lastActivityAt else None,
+            "messagesCount": msg_count,
+        })
+
+    return {"success": True, "data": data, "timestamp": datetime.utcnow().isoformat()}
+
+
 @app.get("/api/messages")
-def list_messages(limit: int = Query(50, ge=1, le=200), db: Session = Depends(get_db)):
-    msgs = (
-        db.query(ChatMessage)
-        .order_by(ChatMessage.sentAt.asc())
-        .limit(limit)
-        .all()
-    )
+def list_messages(
+    accountId: Optional[str] = Query(None),
+    conversationId: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ChatMessage)
+    if accountId:
+        query = query.filter(ChatMessage.accountId == accountId)
+    if conversationId:
+        conv = (
+            db.query(Conversation)
+            .filter(
+                (Conversation.id == conversationId) | (Conversation.remoteConversationId == conversationId)
+            )
+            .first()
+        )
+        if conv:
+            query = query.filter(ChatMessage.conversationId == conv.id)
+        else:
+            query = query.filter(ChatMessage.conversationId == conversationId)
+
+    msgs = query.order_by(ChatMessage.sentAt.asc()).limit(limit).all()
     data = []
     for m in msgs:
         data.append({

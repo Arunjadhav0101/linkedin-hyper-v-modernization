@@ -230,6 +230,12 @@ class JobProcessor:
 
                 for c_data in conversations_data:
                     c_id = c_data["conversationId"]
+                    partner_name = c_data.get("partnerName") or "LinkedIn Member"
+                    partner_id = c_data.get("partnerIdentifier") or c_id
+                    participant_ids = c_data.get("participantIds") or [account.id, partner_id]
+                    last_snippet = c_data.get("lastMessageSnippet")
+                    last_activity = c_data.get("lastActivityAt") or datetime.utcnow()
+
                     conv = (
                         db.query(Conversation)
                         .filter(
@@ -242,33 +248,56 @@ class JobProcessor:
                         conv = Conversation(
                             accountId=account.id,
                             remoteConversationId=c_id,
-                            participantIds=[account.id],
+                            participantIds=participant_ids,
+                            lastMessageSnippet=last_snippet,
+                            lastActivityAt=last_activity,
                         )
                         db.add(conv)
                         db.flush()
+                    else:
+                        conv.participantIds = participant_ids
+                        if last_snippet:
+                            conv.lastMessageSnippet = last_snippet
+                        if last_activity:
+                            conv.lastActivityAt = last_activity
 
-                    for ev in c_data.get("messages", []):
-                        ev_id = ev.get("backendEventId") or ev.get("entityUrn", "")
-                        body = ev.get("eventContent", {}).get("messageEvent", {}).get("body", "")
-                        from_id = ev.get("from", {}).get("member", "")
-                        if not ev_id or not body:
+                    for msg in c_data.get("messages", []):
+                        ev_id = msg.get("remoteMessageId")
+                        content = msg.get("content")
+                        sender_id = msg.get("senderId", "unknown")
+                        sender_name = msg.get("senderName")
+                        sent_dt = msg.get("sentAt") or datetime.utcnow()
+
+                        if not ev_id or not content:
                             continue
 
                         key = hashlib.sha256(f"{account.id}:{conv.id}:{ev_id}".encode()).hexdigest()
                         if not db.query(ChatMessage).filter(ChatMessage.idempotencyKey == key).first():
-                            direction = "OUTBOUND" if from_id == account.linkedinId else "INBOUND"
+                            # Determine direction
+                            is_self = False
+                            if account.publicIdentifier and account.publicIdentifier.lower() in sender_id.lower():
+                                is_self = True
+                            if account.linkedinId and account.linkedinId in sender_id:
+                                is_self = True
+
+                            direction = "OUTBOUND" if is_self else "INBOUND"
+                            recipient_id = partner_id if is_self else account.id
+                            recipient_name = partner_name if is_self else (account.name or account.email)
+
                             db.add(
                                 ChatMessage(
                                     accountId=account.id,
                                     conversationId=conv.id,
                                     remoteMessageId=ev_id,
-                                    senderId=from_id or "unknown",
-                                    recipientId=account.id,
-                                    content=body,
+                                    senderId=sender_id,
+                                    senderName=sender_name or (account.name if is_self else partner_name),
+                                    recipientId=recipient_id,
+                                    recipientName=recipient_name,
+                                    content=content,
                                     direction=direction,
                                     idempotencyKey=key,
                                     syncStatus="SYNCED",
-                                    sentAt=datetime.utcnow(),
+                                    sentAt=sent_dt,
                                 )
                             )
                             ingested += 1
@@ -276,7 +305,7 @@ class JobProcessor:
                 job.status = "COMPLETED"
                 job.completedAt = datetime.utcnow()
                 job.errorMessage = None
-                logger.info(f"Job {job.id} (SYNC_MESSAGES) synced {ingested} messages")
+                logger.info(f"Job {job.id} (SYNC_MESSAGES) synced {ingested} messages across {len(conversations_data)} conversations")
 
             else:
                 raise ValidationError(f"Unknown job action type: '{job_type}'")

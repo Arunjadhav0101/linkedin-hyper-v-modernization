@@ -44,3 +44,9 @@ pnpm-debug.log*
 # SQLite / Local DBs
 *.sqlite
 *.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
