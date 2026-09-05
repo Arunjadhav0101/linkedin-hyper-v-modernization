@@ -47,6 +47,14 @@ def get_db_context():
 
 def init_db():
     """Initializes tables and seeds default demo accounts if none exist."""
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text('ALTER TYPE "AccountStatus" ADD VALUE IF NOT EXISTS \'SESSION_INVALID\';'))
+            conn.commit()
+    except Exception:
+        pass
+
     Base.metadata.create_all(bind=engine)
     with get_db_context() as db:
         existing = db.query(LinkedInAccount).first()

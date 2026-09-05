@@ -261,7 +261,9 @@ class VoyagerClient:
 
         with httpx.Client(timeout=20.0, follow_redirects=False) as client:
             resp = client.get(url, headers=headers)
-            if resp.status_code != 200:
+            if resp.status_code in (401, 302):
+                raise VoyagerApiError(401, "Session expired or invalidated by LinkedIn (401 Unauthorized)")
+            elif resp.status_code != 200:
                 raise VoyagerApiError(resp.status_code, f"Failed to fetch conversations (HTTP {resp.status_code})")
 
             try:

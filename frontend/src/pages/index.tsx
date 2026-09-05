@@ -526,11 +526,18 @@ export default function LinkedInHyperVApp() {
           JSESSIONID: newJsessionId.trim() || undefined,
         }),
       });
-      const json = await res.json();
+      let json: any;
+      const text = await res.text();
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = { success: false, detail: text || `Server error (HTTP ${res.status})` };
+      }
+
       if (json.success) {
         setVerifyResult({
           verified: true,
-          message: `✓ Valid Session! Logged in as: ${json.data.publicIdentifier || 'LinkedIn Member'} (200 OK)`,
+          message: `✓ Valid Session! Logged in as: ${json.data?.publicIdentifier || 'LinkedIn Member'} (200 OK)`,
         });
       } else {
         setVerifyResult({

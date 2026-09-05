@@ -34,12 +34,17 @@ class JobProcessor:
 
     @staticmethod
     def is_permanent_error(exc: Exception) -> bool:
-        """Determines if an error is permanent (4xx / validation / config) and should NOT be retried."""
+        """Determines if an error is permanent (4xx / 302 / validation / config) and should NOT be retried."""
         if isinstance(exc, (MissingIntegrationError, ValidationError)):
             return True
         if isinstance(exc, VoyagerApiError):
+            if exc.status_code in (301, 302, 400, 401, 403, 404, 422):
+                return True
             if 400 <= exc.status_code < 500:
                 return True
+        err_str = str(exc).lower()
+        if any(keyword in err_str for keyword in ["401", "302", "unauthorized", "expired", "invalid", "missing"]):
+            return True
         return False
 
     def acquire_lock(self, account_id: str, timeout_sec: int = 30) -> bool:
