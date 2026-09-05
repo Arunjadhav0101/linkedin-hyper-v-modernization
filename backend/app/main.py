@@ -127,13 +127,6 @@ def list_accounts(db: Session = Depends(get_db)):
         li_at = cookies.get("li_at", "")
         has_session = bool(li_at and len(li_at) >= 50)
 
-        if not li_at:
-            auth_status = "NOT_CONFIGURED"
-        elif len(li_at) < 50:
-            auth_status = "SESSION_INVALID"
-        else:
-            auth_status = "AUTHORIZED"
-
         pending_count = (
             db.query(AutomationJob)
             .filter(
@@ -149,6 +142,18 @@ def list_accounts(db: Session = Depends(get_db)):
             .order_by(AutomationJob.updatedAt.desc())
             .first()
         )
+
+        has_auth_failure = (
+            a.status == "SESSION_INVALID"
+            or (last_failed_job and ("401" in (last_failed_job.errorMessage or "") or "expired" in (last_failed_job.errorMessage or "").lower()))
+        )
+
+        if not li_at:
+            auth_status = "NOT_CONFIGURED"
+        elif len(li_at) < 50 or has_auth_failure:
+            auth_status = "SESSION_INVALID"
+        else:
+            auth_status = "AUTHORIZED"
 
         data.append({
             "id": a.id,
@@ -194,6 +199,7 @@ def save_account(body: AccountSaveRequest, db: Session = Depends(get_db)):
         existing_cookies = account.cookies or {}
         if li_at:
             existing_cookies["li_at"] = li_at
+            account.status = "ACTIVE"
         if jsessionid:
             existing_cookies["JSESSIONID"] = jsessionid
         account.cookies = existing_cookies
@@ -241,6 +247,7 @@ def verify_session_cookie(body: VerifySessionRequest, db: Session = Depends(get_
     try:
         result = voyager_client.verify_session(temp_account)
         if target_account:
+            target_account.status = "ACTIVE"
             if result.get("publicIdentifier"):
                 target_account.publicIdentifier = result["publicIdentifier"]
             if result.get("plainId"):
@@ -253,12 +260,18 @@ def verify_session_cookie(body: VerifySessionRequest, db: Session = Depends(get_
             "timestamp": datetime.utcnow().isoformat(),
         }
     except VoyagerApiError as err:
+        if target_account and err.status_code in (401, 302):
+            target_account.status = "SESSION_INVALID"
+            db.commit()
         return {
             "success": False,
             "error": {"code": f"HTTP_{err.status_code}", "message": err.message},
             "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as exc:
+        if target_account:
+            target_account.status = "SESSION_INVALID"
+            db.commit()
         return {
             "success": False,
             "error": {"code": "VERIFICATION_ERROR", "message": str(exc)},

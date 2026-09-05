@@ -322,6 +322,8 @@ class JobProcessor:
                 job.status = "FAILED"
                 job.errorMessage = err_msg
                 job.completedAt = datetime.utcnow()
+                if "401" in err_msg or "Unauthorized" in err_msg or isinstance(exc, MissingIntegrationError):
+                    account.status = "SESSION_INVALID"
                 db.commit()
                 logger.warning(f"Job {job.id} marked as FAILED without retries (Permanent Error)")
             else:

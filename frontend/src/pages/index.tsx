@@ -117,6 +117,15 @@ export default function LinkedInHyperVApp() {
   const [isSending, setIsSending] = useState(false);
   const [uiAlert, setUiAlert] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
+  const selectedAccountIdRef = useRef(selectedAccountId);
+  selectedAccountIdRef.current = selectedAccountId;
+
+  const selectedConversationIdRef = useRef(selectedConversationId);
+  selectedConversationIdRef.current = selectedConversationId;
+
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Scroll chat to bottom
@@ -135,41 +144,43 @@ export default function LinkedInHyperVApp() {
       const json = await res.json();
       if (json.success && json.data) {
         setAccounts(json.data);
-        if (!selectedAccountId && json.data.length > 0) {
+        if (!selectedAccountIdRef.current && json.data.length > 0) {
           setSelectedAccountId(json.data[0].id);
         }
       }
     } catch {}
-  }, [selectedAccountId]);
+  }, []);
 
   // 2. Fetch Conversations
-  const fetchConversations = useCallback(async () => {
-    if (!selectedAccountId) return;
+  const fetchConversations = useCallback(async (targetAccountId?: string) => {
+    const accId = targetAccountId || selectedAccountIdRef.current;
+    if (!accId) return;
     try {
-      const res = await fetch(`/api/conversations?accountId=${encodeURIComponent(selectedAccountId)}`);
+      const res = await fetch(`/api/conversations?accountId=${encodeURIComponent(accId)}`);
       const json = await res.json();
       if (json.success && json.data) {
         setConversations(json.data);
-        // If no conversation selected, select first one
-        if (!selectedConversationId && json.data.length > 0) {
+        if (!selectedConversationIdRef.current && json.data.length > 0) {
           setSelectedConversationId(json.data[0].id);
         }
       }
     } catch {}
-  }, [selectedAccountId, selectedConversationId]);
+  }, []);
 
   // 3. Fetch Messages for Selected Conversation
-  const fetchMessages = useCallback(async () => {
-    if (!selectedAccountId) return;
+  const fetchMessages = useCallback(async (targetAccountId?: string, targetConvId?: string) => {
+    const accId = targetAccountId || selectedAccountIdRef.current;
+    const conv = targetConvId !== undefined ? targetConvId : selectedConversationIdRef.current;
+    if (!accId) return;
     try {
-      const convParam = selectedConversationId ? `&conversationId=${encodeURIComponent(selectedConversationId)}` : '';
-      const res = await fetch(`/api/messages?accountId=${encodeURIComponent(selectedAccountId)}${convParam}&limit=150`);
+      const convParam = conv ? `&conversationId=${encodeURIComponent(conv)}` : '';
+      const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accId)}${convParam}&limit=150`);
       const json = await res.json();
       if (json.success && json.data) {
         setActiveMessages(json.data);
       }
     } catch {}
-  }, [selectedAccountId, selectedConversationId]);
+  }, []);
 
   // 4. Fetch Jobs
   const fetchJobs = useCallback(async () => {
@@ -193,24 +204,60 @@ export default function LinkedInHyperVApp() {
     } catch {}
   }, []);
 
-  // Polling Loop (every 2 seconds)
+  // Initial load on mount
   useEffect(() => {
     fetchAccounts();
-    fetchConversations();
-    fetchMessages();
-    fetchJobs();
     fetchHealth();
+  }, [fetchAccounts, fetchHealth]);
 
-    if (!autoRefresh) return;
-    const interval = setInterval(() => {
+  // When selected account changes
+  useEffect(() => {
+    if (selectedAccountId) {
+      fetchConversations(selectedAccountId);
+      fetchMessages(selectedAccountId, selectedConversationId);
+    }
+  }, [selectedAccountId, fetchConversations, fetchMessages]);
+
+  // When selected conversation changes
+  useEffect(() => {
+    if (selectedAccountId && selectedConversationId) {
+      fetchMessages(selectedAccountId, selectedConversationId);
+    }
+  }, [selectedConversationId, selectedAccountId, fetchMessages]);
+
+  // When tab switches, fetch that tab's data
+  useEffect(() => {
+    if (activeTab === 'inbox') {
       fetchConversations();
       fetchMessages();
+    } else if (activeTab === 'jobs') {
       fetchJobs();
+    } else if (activeTab === 'accounts') {
+      fetchAccounts();
+    } else if (activeTab === 'health') {
       fetchHealth();
-    }, 2000);
+    }
+  }, [activeTab, fetchConversations, fetchMessages, fetchJobs, fetchAccounts, fetchHealth]);
+
+  // Controlled, Tab-Specific Background Polling Loop (every 5 seconds)
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const interval = setInterval(() => {
+      const tab = activeTabRef.current;
+      if (tab === 'inbox') {
+        fetchConversations();
+        fetchMessages();
+      } else if (tab === 'jobs') {
+        fetchJobs();
+      } else if (tab === 'health') {
+        fetchHealth();
+      } else if (tab === 'accounts') {
+        fetchAccounts();
+      }
+    }, 5000);
 
     return () => clearInterval(interval);
-  }, [autoRefresh, fetchAccounts, fetchConversations, fetchMessages, fetchJobs, fetchHealth]);
+  }, [autoRefresh, fetchConversations, fetchMessages, fetchJobs, fetchHealth, fetchAccounts]);
 
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
   const activeConversation = conversations.find((c) => c.id === selectedConversationId);
@@ -485,7 +532,6 @@ export default function LinkedInHyperVApp() {
           verified: true,
           message: `✓ Valid Session! Logged in as: ${json.data.publicIdentifier || 'LinkedIn Member'} (200 OK)`,
         });
-        fetchAccounts();
       } else {
         setVerifyResult({
           verified: false,
@@ -496,6 +542,7 @@ export default function LinkedInHyperVApp() {
       setVerifyResult({ verified: false, message: `❌ Error: ${err.message}` });
     } finally {
       setIsVerifying(false);
+      fetchAccounts();
     }
   };
 
@@ -839,7 +886,7 @@ export default function LinkedInHyperVApp() {
                       View on LinkedIn ↗
                     </a>
                     <button
-                      onClick={fetchMessages}
+                      onClick={() => fetchMessages()}
                       style={{ background: '#334155', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 11, cursor: 'pointer' }}
                     >
                       Refresh
