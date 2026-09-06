@@ -553,8 +553,8 @@ export default function LinkedInHyperVApp() {
     }
   };
 
-  // Handle Maintenance (Retry, Clear DLQ)
-  const handleMaintenance = async (action: 'RETRY_DLQ' | 'CLEAR_DLQ') => {
+  // Handle Maintenance (Retry, Clear DLQ, Clear Jobs)
+  const handleMaintenance = async (action: 'RETRY_DLQ' | 'CLEAR_DLQ' | 'CLEAR_JOBS') => {
     try {
       const res = await fetch('/api/maintenance/reset', {
         method: 'POST',
@@ -563,7 +563,13 @@ export default function LinkedInHyperVApp() {
       });
       const json = await res.json();
       if (json.success) {
-        alert(action === 'RETRY_DLQ' ? 'Failed and DLQ jobs re-queued for execution!' : 'DLQ cleared!');
+        alert(
+          action === 'RETRY_DLQ'
+            ? 'Failed and DLQ jobs re-queued for execution!'
+            : action === 'CLEAR_JOBS'
+            ? 'All automation jobs cleared!'
+            : 'DLQ cleared!'
+        );
         fetchJobs();
       }
     } catch (err: any) {
@@ -1145,6 +1151,12 @@ export default function LinkedInHyperVApp() {
                 Clear DLQ
               </button>
               <button
+                onClick={() => handleMaintenance('CLEAR_JOBS')}
+                style={{ background: '#7f1d1d', color: '#fca5a5', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
+              >
+                Clear Jobs
+              </button>
+              <button
                 onClick={fetchJobs}
                 style={{ background: '#334155', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
               >
@@ -1224,7 +1236,17 @@ export default function LinkedInHyperVApp() {
                       </td>
                       <td>{renderAuthBadge(a.authStatus)}</td>
                       <td>{a.pendingJobsCount || 0}</td>
-                      <td>
+                      <td style={{ display: 'flex', gap: 6, padding: '10px 0' }}>
+                        <button
+                          onClick={() => {
+                            setNewAccountEmail(a.email);
+                            setNewAccountName(a.name || '');
+                            setVerifyResult(null);
+                          }}
+                          style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
+                        >
+                          Update Cookies
+                        </button>
                         <button
                           onClick={() => handleVerifySession(a.id)}
                           disabled={isVerifying}

@@ -493,5 +493,11 @@ def maintenance_action(body: MaintenanceRequest, db: Session = Depends(get_db)):
         db.commit()
         return {"success": True, "message": f"Re-queued {len(retried_jobs)} failed/DLQ jobs"}
 
+    elif action == "CLEAR_JOBS":
+        db.query(DeadLetterQueue).delete()
+        db.query(AutomationJob).delete()
+        db.commit()
+        return {"success": True, "message": "All automation jobs and DLQ records cleared"}
+
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported maintenance action: '{action}'")
