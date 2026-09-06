@@ -63,13 +63,23 @@ class VoyagerClient:
     def _get_headers(self, account: LinkedInAccount) -> Dict[str, str]:
         li_at, jsessionid = self.validate_session(account)
         csrf_token = jsessionid.replace('"', "")
+        
+        cookie_parts = [f"li_at={li_at}"]
+        if csrf_token:
+            cookie_parts.append(f'JSESSIONID="{csrf_token}"')
+
+        cookies = account.cookies or {}
+        for k, v in cookies.items():
+            if k not in ("li_at", "JSESSIONID") and v:
+                cookie_parts.append(f"{k}={v}")
+
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
             "Accept": "application/vnd.linkedin.normalized+json+2.1",
             "Content-Type": "application/json; charset=UTF-8",
             "x-li-lang": "en_US",
             "x-restli-protocol-version": "2.0.0",
-            "Cookie": f'li_at={li_at}; JSESSIONID="{csrf_token}"',
+            "Cookie": "; ".join(cookie_parts),
         }
         if csrf_token:
             headers["csrf-token"] = csrf_token

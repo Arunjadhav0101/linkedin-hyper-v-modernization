@@ -200,6 +200,18 @@ def list_accounts(db: Session = Depends(get_db)):
 @app.post("/api/accounts")
 def save_account(body: AccountSaveRequest, db: Session = Depends(get_db)):
     cookies = body.cookies or {}
+    
+    # If raw cookie string was provided, parse all key-value pairs
+    raw_cookie_str = cookies.get("raw") or cookies.get("cookie_header")
+    if raw_cookie_str:
+        for part in raw_cookie_str.split(";"):
+            if "=" in part:
+                k, v = part.strip().split("=", 1)
+                clean_k = k.strip()
+                clean_v = v.strip().strip('"\'')
+                if clean_k:
+                    cookies[clean_k] = clean_v
+
     li_at = (cookies.get("li_at") or "").strip().strip('"\'')
     jsessionid = (cookies.get("JSESSIONID") or "").strip().strip('"\'')
 
@@ -210,13 +222,14 @@ def save_account(body: AccountSaveRequest, db: Session = Depends(get_db)):
             email=body.email,
             name=body.name,
             status="ACTIVE",
-            cookies={"li_at": li_at, "JSESSIONID": jsessionid},
+            cookies=cookies,
         )
         db.add(account)
     else:
         if body.name:
             account.name = body.name
         existing_cookies = account.cookies or {}
+        existing_cookies.update(cookies)
         if li_at:
             existing_cookies["li_at"] = li_at
             account.status = "ACTIVE"
@@ -252,8 +265,8 @@ def verify_session_cookie(body: VerifySessionRequest, db: Session = Depends(get_
         target_account = db.query(LinkedInAccount).filter(LinkedInAccount.id == body.accountId).first()
         if target_account and not li_at:
             c = target_account.cookies or {}
-            li_at = c.get("li_at", "")
-            jsessionid = c.get("JSESSIONID", "")
+            li_at = (c.get("li_at") or "").strip().strip('"\'')
+            jsessionid = (c.get("JSESSIONID") or "").strip().strip('"\'')
 
     if not li_at or len(li_at) < 50:
         raise HTTPException(
@@ -261,16 +274,24 @@ def verify_session_cookie(body: VerifySessionRequest, db: Session = Depends(get_
             detail="The 'li_at' cookie must be at least 50 characters long (real LinkedIn tokens start with 'AQED...' and are ~150 chars).",
         )
 
-    # Test session live with LinkedIn
-    temp_account = target_account or LinkedInAccount(
-        email="test@verify.com",
-        cookies={"li_at": li_at, "JSESSIONID": jsessionid},
+    # Test session live with LinkedIn using the PROVIDED tokens (never stale DB cookies)
+    cookies_to_test = dict(target_account.cookies or {}) if target_account else {}
+    cookies_to_test["li_at"] = li_at
+    if jsessionid:
+        cookies_to_test["JSESSIONID"] = jsessionid
+
+    temp_account = LinkedInAccount(
+        email=target_account.email if target_account else "test@verify.com",
+        publicIdentifier=target_account.publicIdentifier if target_account else None,
+        linkedinId=target_account.linkedinId if target_account else None,
+        cookies=cookies_to_test,
     )
 
     try:
         result = voyager_client.verify_session(temp_account)
         if target_account:
             target_account.status = "ACTIVE"
+            target_account.cookies = cookies_to_test
             if result.get("publicIdentifier"):
                 target_account.publicIdentifier = result["publicIdentifier"]
             if result.get("plainId"):

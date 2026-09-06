@@ -1318,6 +1318,7 @@ export default function LinkedInHyperVApp() {
                       <td style={{ display: 'flex', gap: 6, padding: '10px 0' }}>
                         <button
                           onClick={() => {
+                            setSelectedAccountId(a.id);
                             setNewAccountEmail(a.email);
                             setNewAccountName(a.name || '');
                             setVerifyResult(null);
@@ -1346,9 +1347,10 @@ export default function LinkedInHyperVApp() {
             <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>Configure Authorized Session</h2>
             <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 12, marginBottom: 14, fontSize: 12, color: '#cbd5e1', lineHeight: 1.5 }}>
               <strong style={{ color: '#38bdf8' }}>Extracting cookies from LinkedIn:</strong><br />
-              1. Open <strong>linkedin.com</strong> in browser.<br />
+              1. Open <strong>linkedin.com</strong> in your browser (keep this tab open, do not click Sign Out).<br />
               2. Press <code>F12</code> &rarr; <strong>Application</strong> &rarr; <strong>Cookies</strong> &rarr; <code>https://www.linkedin.com</code>.<br />
-              3. Copy <code>li_at</code> (~150 chars, begins with AQED...) and <code>JSESSIONID</code>.
+              3. Copy <code>li_at</code> (~150 chars, begins with AQED...) and <code>JSESSIONID</code>.<br />
+              <em style={{ color: '#94a3b8' }}>Tip: You can also paste your full Cookie header into the field below and it will auto-extract!</em>
             </div>
 
             <form onSubmit={handleSaveAccount}>
@@ -1356,7 +1358,7 @@ export default function LinkedInHyperVApp() {
                 <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>Account Email:</label>
                 <input
                   type="email"
-                  placeholder="www.jadhavarun2004@gmail.com"
+                  placeholder="arunj5687@gmail.com"
                   value={newAccountEmail}
                   onChange={(e) => setNewAccountEmail(e.target.value)}
                   required
@@ -1376,12 +1378,28 @@ export default function LinkedInHyperVApp() {
               </div>
 
               <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>`li_at` Session Token (Starts with AQED..., ~150 chars):</label>
+                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>`li_at` Session Token (or paste entire Cookie header):</label>
                 <textarea
                   rows={3}
-                  placeholder="AQEDAVB..."
+                  placeholder="AQEDAVB... or paste raw Cookie: header"
                   value={newLiAt}
-                  onChange={(e) => setNewLiAt(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val.includes(';') && val.includes('=')) {
+                      // Auto-extract li_at and JSESSIONID from raw cookie string
+                      for (const part of val.split(';')) {
+                        const eq = part.indexOf('=');
+                        if (eq !== -1) {
+                          const k = part.slice(0, eq).trim();
+                          const v = part.slice(eq + 1).trim().replace(/^['"]+|['"]+$/g, '');
+                          if (k === 'li_at') setNewLiAt(v);
+                          if (k === 'JSESSIONID') setNewJsessionId(v);
+                        }
+                      }
+                    } else {
+                      setNewLiAt(val);
+                    }
+                  }}
                   required
                   style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontFamily: 'monospace', fontSize: 11 }}
                 />
@@ -1423,7 +1441,7 @@ export default function LinkedInHyperVApp() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleVerifySession()}
+                  onClick={() => handleVerifySession(selectedAccountId)}
                   disabled={isVerifying}
                   style={{ background: '#334155', color: '#38bdf8', border: '1px solid #0284c7', padding: '10px 14px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
                 >
