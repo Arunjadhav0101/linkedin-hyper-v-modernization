@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from .database import get_db_context
 from .models import LinkedInAccount, AutomationJob, Conversation, ChatMessage, DeadLetterQueue
 from .voyager import VoyagerClient, VoyagerApiError, MissingIntegrationError, ValidationError
+from .auth_service import validate_account
+from .circuit_breaker import circuit_breaker
 
 logger = logging.getLogger("hyperv.worker")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -29,8 +31,8 @@ except Exception:
 
 
 class JobProcessor:
-    def __init__(self):
-        self.voyager = VoyagerClient()
+    def __init__(self, voyager: Optional[VoyagerClient] = None):
+        self.voyager = voyager or VoyagerClient()
 
     @staticmethod
     def is_permanent_error(exc: Exception) -> bool:
@@ -40,7 +42,7 @@ class JobProcessor:
         if isinstance(exc, VoyagerApiError):
             if exc.status_code in (301, 302, 400, 401, 403, 404, 422):
                 return True
-            if 400 <= exc.status_code < 500:
+            if 400 <= exc.status_code < 500 and exc.status_code != 429:
                 return True
         err_str = str(exc).lower()
         if any(keyword in err_str for keyword in ["401", "302", "unauthorized", "expired", "invalid", "missing"]):
@@ -80,26 +82,38 @@ class JobProcessor:
             logger.warning(f"Cleaned up {len(timed_out)} stuck jobs to TIMED_OUT status")
 
     def execute_job(self, db: Session, job: AutomationJob):
-        account = db.query(LinkedInAccount).filter(LinkedInAccount.id == job.accountId).first()
+        # 1. Centralized Pre-flight Authorization Check
+        auth_res = validate_account(db, job.accountId, force_live_check=False, voyager_client=self.voyager)
+        if not auth_res.valid:
+            logger.warning(f"Pre-flight rejected for job {job.id}: {auth_res.reason}")
+            job.status = "FAILED"
+            job.retryCount = 0
+            job.errorMessage = (
+                f"External LinkedIn integration is not configured or the authorization session is invalid: {auth_res.reason}"
+            )
+            job.completedAt = datetime.utcnow()
+            db.commit()
+            return
+
+        account = auth_res.account
         if not account:
             job.status = "FAILED"
+            job.retryCount = 0
             job.errorMessage = f"LinkedInAccount '{job.accountId}' does not exist"
             job.completedAt = datetime.utcnow()
             db.commit()
             return
 
-        # Pre-flight authorization check
-        try:
-            self.voyager.validate_session(account)
-        except MissingIntegrationError as err:
-            logger.warning(f"Pre-flight failed for job {job.id}: {err}")
-            job.status = "FAILED"
-            job.errorMessage = str(err)
-            job.completedAt = datetime.utcnow()
+        # 2. Circuit Breaker Check
+        if not circuit_breaker.is_available():
+            logger.warning(f"Circuit breaker is OPEN. Deferring job {job.id}")
+            job.status = "RETRYING"
+            job.errorMessage = "Circuit breaker OPEN: remote LinkedIn server is currently unreachable"
+            job.scheduledFor = datetime.utcnow() + timedelta(seconds=15)
             db.commit()
             return
 
-        # Acquire lock
+        # 3. Acquire Distributed Lock
         if not self.acquire_lock(account.id):
             logger.info(f"Account {account.id} is currently locked by another task; deferring job {job.id}")
             return
@@ -171,6 +185,7 @@ class JobProcessor:
                 job.status = "COMPLETED"
                 job.completedAt = datetime.utcnow()
                 job.errorMessage = None
+                circuit_breaker.record_success()
                 logger.info(f"Job {job.id} (SEND_MESSAGE) completed successfully")
 
             elif job_type == "SEND_CONNECTION_REQUEST":
@@ -226,6 +241,7 @@ class JobProcessor:
                 job.status = "COMPLETED"
                 job.completedAt = datetime.utcnow()
                 job.errorMessage = None
+                circuit_breaker.record_success()
                 logger.info(f"Job {job.id} (SEND_CONNECTION_REQUEST) completed successfully")
 
             elif job_type == "SYNC_MESSAGES":
@@ -310,6 +326,7 @@ class JobProcessor:
                 job.status = "COMPLETED"
                 job.completedAt = datetime.utcnow()
                 job.errorMessage = None
+                circuit_breaker.record_success()
                 logger.info(f"Job {job.id} (SYNC_MESSAGES) synced {ingested} messages across {len(conversations_data)} conversations")
 
             else:
@@ -321,14 +338,20 @@ class JobProcessor:
             db.rollback()
             err_msg = str(exc)
             logger.error(f"Job {job.id} execution failed: {err_msg}")
+            circuit_breaker.record_failure(exc)
 
             if self.is_permanent_error(exc):
-                # Permanent failure: DO NOT retry blindly, terminate immediately
+                # Permanent failure: DO NOT retry blindly, terminate immediately with 0 retries
                 job.status = "FAILED"
+                job.retryCount = 0
                 job.errorMessage = err_msg
                 job.completedAt = datetime.utcnow()
-                if "401" in err_msg or "Unauthorized" in err_msg or isinstance(exc, MissingIntegrationError):
+
+                if "401" in err_msg or "Unauthorized" in err_msg or (isinstance(exc, VoyagerApiError) and exc.status_code in (401, 302)):
                     account.status = "SESSION_INVALID"
+                elif isinstance(exc, VoyagerApiError) and exc.status_code == 403:
+                    account.status = "SESSION_INVALID"
+
                 db.commit()
                 logger.warning(f"Job {job.id} marked as FAILED without retries (Permanent Error)")
             else:

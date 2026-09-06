@@ -1,8 +1,13 @@
+import json
+import logging
 import re
 import urllib.parse
+from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 import httpx
 from .models import LinkedInAccount
+
+logger = logging.getLogger("hyperv.voyager")
 
 
 class MissingIntegrationError(Exception):
@@ -50,7 +55,7 @@ class VoyagerClient:
         if len(li_at) < 50:
             raise MissingIntegrationError(
                 f"Invalid LinkedIn session cookie: The 'li_at' cookie for '{account.email}' is only {len(li_at)} characters. "
-                f"A real LinkedIn session cookie is ~150 chars starting with 'AQED...'. You entered a password or placeholder."
+                "A real LinkedIn session cookie is ~150 chars starting with 'AQED...'."
             )
 
         return li_at, jsessionid
@@ -70,6 +75,44 @@ class VoyagerClient:
             headers["csrf-token"] = csrf_token
         return headers
 
+    @staticmethod
+    def _parse_response_safely(resp: httpx.Response) -> Tuple[int, Optional[Dict[str, Any]], str]:
+        """
+        Reads response body text once and attempts JSON decoding.
+        Prevents 'Body has already been read' / unusable stream exceptions.
+        """
+        text = resp.text or ""
+        parsed_json = None
+        try:
+            if text.strip():
+                parsed_json = json.loads(text)
+        except Exception:
+            parsed_json = None
+        snippet = text[:300].strip()
+        return resp.status_code, parsed_json, snippet
+
+    @staticmethod
+    def _handle_error_status(status_code: int, parsed_json: Optional[Dict[str, Any]], snippet: str) -> None:
+        """Maps HTTP status codes to specific VoyagerApiErrors without leaking secrets."""
+        server_msg = None
+        if isinstance(parsed_json, dict):
+            server_msg = parsed_json.get("message") or parsed_json.get("error")
+
+        if status_code in (401, 302):
+            raise VoyagerApiError(401, "Session expired or invalidated by LinkedIn (401 Unauthorized)", body=parsed_json)
+        elif status_code == 403:
+            raise VoyagerApiError(403, "LinkedIn access forbidden or checkpoint required (403 Forbidden)", body=parsed_json)
+        elif status_code == 422:
+            detail = server_msg or snippet or "Unprocessable Entity"
+            raise VoyagerApiError(422, f"LinkedIn rejected payload as unprocessable (422 Unprocessable Entity): {detail}", body=parsed_json)
+        elif status_code == 429:
+            raise VoyagerApiError(429, "LinkedIn rate limit exceeded (429 Too Many Requests)", body=parsed_json)
+        elif 500 <= status_code < 600:
+            raise VoyagerApiError(status_code, f"LinkedIn temporary server failure (HTTP {status_code})", body=parsed_json)
+        else:
+            msg = server_msg or snippet or f"HTTP {status_code}"
+            raise VoyagerApiError(status_code, f"LinkedIn API request failed (HTTP {status_code}): {msg}", body=parsed_json)
+
     def verify_session(self, account: LinkedInAccount) -> Dict[str, Any]:
         """Tests the session directly with LinkedIn via GET /voyager/api/me."""
         headers = self._get_headers(account)
@@ -77,19 +120,16 @@ class VoyagerClient:
 
         with httpx.Client(timeout=15.0, follow_redirects=False) as client:
             resp = client.get(url, headers=headers)
+            status_code, parsed_json, snippet = self._parse_response_safely(resp)
 
-            if resp.status_code == 200:
-                data = resp.json()
+            if status_code == 200 and isinstance(parsed_json, dict):
                 return {
                     "verified": True,
-                    "publicIdentifier": data.get("publicIdentifier"),
-                    "plainId": data.get("plainId"),
+                    "publicIdentifier": parsed_json.get("publicIdentifier"),
+                    "plainId": parsed_json.get("plainId"),
                     "message": "LinkedIn session verified successfully (200 OK)",
                 }
-            elif resp.status_code in (401, 302):
-                raise VoyagerApiError(401, "Session expired or invalidated by LinkedIn (401 Unauthorized)")
-            else:
-                raise VoyagerApiError(resp.status_code, f"LinkedIn responded with HTTP {resp.status_code}")
+            self._handle_error_status(status_code, parsed_json, snippet)
 
     def resolve_profile_id(self, account: LinkedInAccount, identifier: str) -> str:
         """Resolves a public vanity name (e.g. 'satyanadella') to member URN via modern dash profiles."""
@@ -104,9 +144,9 @@ class VoyagerClient:
         try:
             with httpx.Client(timeout=15.0, follow_redirects=False) as client:
                 resp = client.get(url, headers=headers)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    elements = data.get("*elements") or data.get("elements") or []
+                status_code, parsed_json, _ = self._parse_response_safely(resp)
+                if status_code == 200 and isinstance(parsed_json, dict):
+                    elements = parsed_json.get("*elements") or parsed_json.get("elements") or []
                     if elements:
                         return elements[0]
         except Exception:
@@ -155,23 +195,16 @@ class VoyagerClient:
 
         with httpx.Client(timeout=20.0, follow_redirects=False) as client:
             resp = client.post(url, headers=headers, json=payload)
-            if resp.status_code not in (200, 201):
-                try:
-                    err_json = resp.json()
-                    msg = err_json.get("message") or f"HTTP {resp.status_code}"
-                except Exception:
-                    msg = f"HTTP {resp.status_code}"
-                raise VoyagerApiError(resp.status_code, msg)
+            status_code, parsed_json, snippet = self._parse_response_safely(resp)
 
-            try:
-                res_data = resp.json()
-                invitation_id = (
-                    res_data.get("value", {}).get("invitationId")
-                    or res_data.get("invitationId")
-                    or f"inv_{int(httpx._utils.get_timestamp() * 1000)}"
-                )
-            except Exception:
-                invitation_id = f"inv_{int(httpx._utils.get_timestamp() * 1000)}"
+            if status_code not in (200, 201):
+                self._handle_error_status(status_code, parsed_json, snippet)
+
+            invitation_id = (
+                (parsed_json or {}).get("value", {}).get("invitationId")
+                or (parsed_json or {}).get("invitationId")
+                or f"inv_{int(datetime.utcnow().timestamp() * 1000)}"
+            )
 
             return {"invitationId": invitation_id, "resolvedProfileId": resolved_id}
 
@@ -228,29 +261,21 @@ class VoyagerClient:
 
         with httpx.Client(timeout=20.0, follow_redirects=False) as client:
             resp = client.post(url, headers=headers, json=payload)
-            if resp.status_code not in (200, 201):
-                try:
-                    err_json = resp.json()
-                    msg = err_json.get("message") or f"HTTP {resp.status_code}"
-                except Exception:
-                    msg = f"HTTP {resp.status_code}"
-                raise VoyagerApiError(resp.status_code, msg)
+            status_code, parsed_json, snippet = self._parse_response_safely(resp)
 
-            try:
-                res_data = resp.json()
-                remote_msg_id = (
-                    res_data.get("value", {}).get("backendEventId")
-                    or res_data.get("backendEventId")
-                    or f"msg_{int(httpx._utils.get_timestamp() * 1000)}"
-                )
-                conv_urn = (
-                    conversation_id
-                    or res_data.get("value", {}).get("conversationUrn", "").replace("urn:li:fs_conversation:", "")
-                    or f"conv_{clean_recipient}"
-                )
-            except Exception:
-                remote_msg_id = f"msg_{int(httpx._utils.get_timestamp() * 1000)}"
-                conv_urn = conversation_id or f"conv_{clean_recipient}"
+            if status_code not in (200, 201):
+                self._handle_error_status(status_code, parsed_json, snippet)
+
+            remote_msg_id = (
+                (parsed_json or {}).get("value", {}).get("backendEventId")
+                or (parsed_json or {}).get("backendEventId")
+                or f"msg_{int(datetime.utcnow().timestamp() * 1000)}"
+            )
+            conv_urn = (
+                conversation_id
+                or (parsed_json or {}).get("value", {}).get("conversationUrn", "").replace("urn:li:fs_conversation:", "")
+                or f"conv_{clean_recipient}"
+            )
 
             return {"remoteMessageId": remote_msg_id, "conversationId": conv_urn}
 
@@ -261,19 +286,19 @@ class VoyagerClient:
 
         with httpx.Client(timeout=20.0, follow_redirects=False) as client:
             resp = client.get(url, headers=headers)
-            if resp.status_code in (401, 302):
-                raise VoyagerApiError(401, "Session expired or invalidated by LinkedIn (401 Unauthorized)")
-            elif resp.status_code != 200:
-                raise VoyagerApiError(resp.status_code, f"Failed to fetch conversations (HTTP {resp.status_code})")
+            status_code, parsed_json, snippet = self._parse_response_safely(resp)
+
+            if status_code != 200:
+                self._handle_error_status(status_code, parsed_json, snippet)
 
             try:
-                data = resp.json()
+                data = parsed_json or {}
                 elements = data.get("elements") or []
                 conversations = []
 
                 for el in elements[:limit]:
                     conv_urn = el.get("entityUrn", "").replace("urn:li:fs_conversation:", "")
-                    
+
                     # Extract participants
                     participants = el.get("participants") or []
                     partner_name = None
@@ -313,7 +338,7 @@ class VoyagerClient:
 
                     for ev in events:
                         ev_id = ev.get("backendEventId") or ev.get("entityUrn", "")
-                        
+
                         # Body content
                         event_content = ev.get("eventContent", {})
                         msg_event = (
@@ -336,7 +361,11 @@ class VoyagerClient:
                         from_mini = from_member.get("miniProfile") or from_member
                         sender_first = from_mini.get("firstName", "")
                         sender_last = from_mini.get("lastName", "")
-                        sender_name = f"{sender_first} {sender_last}".strip() or from_mini.get("publicIdentifier") or "LinkedIn Member"
+                        sender_name = (
+                            f"{sender_first} {sender_last}".strip()
+                            or from_mini.get("publicIdentifier")
+                            or "LinkedIn Member"
+                        )
                         sender_id = from_mini.get("publicIdentifier") or from_mini.get("entityUrn", "") or "unknown"
 
                         created_at_ms = ev.get("createdAt")

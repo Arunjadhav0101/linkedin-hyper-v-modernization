@@ -14,6 +14,8 @@ from .database import init_db, get_db
 from .models import LinkedInAccount, AutomationJob, ChatMessage, Conversation, DeadLetterQueue
 from .voyager import VoyagerClient, VoyagerApiError, MissingIntegrationError, ValidationError
 from .worker import run_worker_loop, redis_client
+from .auth_service import validate_account
+from .circuit_breaker import circuit_breaker
 
 
 @asynccontextmanager
@@ -77,7 +79,7 @@ class SyncRequest(BaseModel):
 
 
 class MaintenanceRequest(BaseModel):
-    action: str  # 'RETRY_DLQ' | 'CLEAR_DLQ'
+    action: str  # 'RETRY_DLQ' | 'CLEAR_DLQ' | 'CLEAR_JOBS'
 
 
 # ---------------------------------------------------------------------------
@@ -101,19 +103,50 @@ def get_health(db: Session = Depends(get_db)):
     else:
         redis_status = "disabled (in-memory lock fallback)"
 
-    account_count = db.query(LinkedInAccount).count()
+    accounts = db.query(LinkedInAccount).all()
+    account_count = len(accounts)
+
+    authorized_count = 0
+    invalid_count = 0
+    not_configured_count = 0
+
+    for a in accounts:
+        auth_res = validate_account(db, a, force_live_check=False)
+        if auth_res.status == "AUTHORIZED":
+            authorized_count += 1
+        elif auth_res.status == "SESSION_INVALID":
+            invalid_count += 1
+        elif auth_res.status == "NOT_CONFIGURED":
+            not_configured_count += 1
+
+    if authorized_count > 0:
+        overall_integration_status = "AUTHORIZED"
+    elif invalid_count > 0:
+        overall_integration_status = "SESSION_INVALID"
+    else:
+        overall_integration_status = "NOT_CONFIGURED"
+
+    infra_healthy = (db_status == "connected")
 
     return {
-        "status": "healthy" if db_status == "connected" else "degraded",
+        "status": "healthy" if infra_healthy else "degraded",
         "database": db_status,
         "redis": redis_status,
         "activeAccounts": account_count,
-        "activeProxies": 0,
-        "circuitBreaker": {
-            "state": "CLOSED",
-            "failureCount": 0,
-            "nextAttemptTime": 0,
+        "infrastructure": {
+            "database": db_status,
+            "redis": redis_status,
+            "worker": "active",
+            "api": "healthy",
         },
+        "externalIntegration": {
+            "provider": "LinkedIn Voyager",
+            "authorizedAccounts": authorized_count,
+            "sessionInvalidAccounts": invalid_count,
+            "notConfiguredAccounts": not_configured_count,
+            "overallStatus": overall_integration_status,
+        },
+        "circuitBreaker": circuit_breaker.to_dict(),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -123,9 +156,7 @@ def list_accounts(db: Session = Depends(get_db)):
     accounts = db.query(LinkedInAccount).order_by(LinkedInAccount.createdAt.asc()).all()
     data = []
     for a in accounts:
-        cookies = a.cookies or {}
-        li_at = cookies.get("li_at", "")
-        has_session = bool(li_at and len(li_at) >= 50)
+        auth_res = validate_account(db, a, force_live_check=False)
 
         pending_count = (
             db.query(AutomationJob)
@@ -143,25 +174,14 @@ def list_accounts(db: Session = Depends(get_db)):
             .first()
         )
 
-        has_auth_failure = (
-            a.status == "SESSION_INVALID"
-            or (last_failed_job and ("401" in (last_failed_job.errorMessage or "") or "expired" in (last_failed_job.errorMessage or "").lower()))
-        )
-
-        if not li_at:
-            auth_status = "NOT_CONFIGURED"
-        elif len(li_at) < 50 or has_auth_failure:
-            auth_status = "SESSION_INVALID"
-        else:
-            auth_status = "AUTHORIZED"
-
         data.append({
             "id": a.id,
             "email": a.email,
             "name": a.name,
             "status": a.status,
-            "authStatus": auth_status,
-            "hasAuthorizedSession": has_session,
+            "authStatus": auth_res.status,
+            "hasAuthorizedSession": auth_res.valid,
+            "reason": auth_res.reason,
             "pendingJobsCount": pending_count,
             "lastError": last_failed_job.errorMessage if last_failed_job else None,
             "hourlyActionLimit": a.hourlyActionLimit,
@@ -207,13 +227,16 @@ def save_account(body: AccountSaveRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(account)
 
+    auth_res = validate_account(db, account, force_live_check=False)
+
     return {
         "success": True,
         "data": {
             "id": account.id,
             "email": account.email,
             "name": account.name,
-            "hasAuthorizedSession": bool(li_at and len(li_at) >= 50),
+            "authStatus": auth_res.status,
+            "hasAuthorizedSession": auth_res.valid,
         },
         "timestamp": datetime.utcnow().isoformat(),
     }
@@ -239,8 +262,8 @@ def verify_session_cookie(body: VerifySessionRequest, db: Session = Depends(get_
         )
 
     # Test session live with LinkedIn
-    temp_account = LinkedInAccount(
-        email=target_account.email if target_account else "test@verify.com",
+    temp_account = target_account or LinkedInAccount(
+        email="test@verify.com",
         cookies={"li_at": li_at, "JSESSIONID": jsessionid},
     )
 
@@ -285,13 +308,15 @@ def dispatch_job(body: JobDispatchRequest, db: Session = Depends(get_db)):
     if not account:
         raise HTTPException(status_code=404, detail=f"LinkedInAccount '{body.accountId}' not found")
 
-    # Pre-flight account check
-    cookies = account.cookies or {}
-    li_at = (cookies.get("li_at") or "").strip()
-    if not li_at or len(li_at) < 50:
+    # Centralized Pre-flight authorization check
+    auth_res = validate_account(db, account, force_live_check=False)
+    if not auth_res.valid:
         raise HTTPException(
             status_code=400,
-            detail=f"Account '{account.email}' is not authorized for live actions. Enter a valid 'li_at' session cookie in Accounts tab.",
+            detail=(
+                "LinkedIn account is not currently authorized for live operations. "
+                "Please configure or re-authorize the account in Accounts & Cookies."
+            ),
         )
 
     job_id = str(uuid4())
@@ -371,7 +396,6 @@ def list_conversations(
 
     data = []
     for c in conversations:
-        # Determine friendly partner name
         partner_name = None
         for pid in (c.participantIds or []):
             if pid != c.accountId and not pid.startswith("acc_"):
@@ -444,6 +468,17 @@ def trigger_sync(body: SyncRequest, db: Session = Depends(get_db)):
     account = db.query(LinkedInAccount).filter(LinkedInAccount.id == body.accountId).first()
     if not account:
         raise HTTPException(status_code=404, detail=f"LinkedInAccount '{body.accountId}' not found")
+
+    # Centralized Pre-flight authorization check
+    auth_res = validate_account(db, account, force_live_check=False)
+    if not auth_res.valid:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "LinkedIn account is not currently authorized for live operations. "
+                "Please configure or re-authorize the account in Accounts & Cookies."
+            ),
+        )
 
     job_id = str(uuid4())
     trace_id = str(uuid4())

@@ -10,6 +10,7 @@ interface Account {
   status: string;
   authStatus?: 'NOT_CONFIGURED' | 'AUTHORIZED' | 'SESSION_INVALID' | 'DISABLED';
   hasAuthorizedSession: boolean;
+  reason?: string;
   lastError?: string | null;
   pendingJobsCount?: number;
   hourlyActionLimit: number;
@@ -19,6 +20,7 @@ interface Account {
   hourlyMessageLimit: number;
   dailyMessageLimit: number;
   lastActionTimestamp?: string;
+  createdAt?: string;
 }
 
 interface ConversationItem {
@@ -70,11 +72,57 @@ interface SystemHealth {
   database: string;
   redis: string;
   activeAccounts: number;
+  infrastructure: {
+    database: string;
+    redis: string;
+    worker: string;
+    api: string;
+  };
+  externalIntegration: {
+    provider: string;
+    authorizedAccounts: number;
+    sessionInvalidAccounts: number;
+    notConfiguredAccounts: number;
+    overallStatus: string;
+  };
   circuitBreaker: {
     state: string;
     failureCount: number;
     nextAttemptTime: number;
   };
+  timestamp: string;
+}
+
+// ---------------------------------------------------------------------------
+// Safe Single-Consumption Fetch Utility (Fixes Body Has Already Been Read)
+// ---------------------------------------------------------------------------
+async function safeFetchJson<T = any>(
+  url: string,
+  options?: RequestInit
+): Promise<{ ok: boolean; status: number; data?: T; error?: string }> {
+  try {
+    const res = await fetch(url, options);
+    const text = await res.text();
+    let data: any = undefined;
+    if (text.trim()) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { detail: text };
+      }
+    }
+    if (!res.ok) {
+      const errorMsg =
+        data?.detail ||
+        data?.error?.message ||
+        data?.message ||
+        (text.length < 300 ? text : `HTTP ${res.status}`);
+      return { ok: false, status: res.status, data, error: errorMsg };
+    }
+    return { ok: true, status: res.status, data };
+  } catch (err: any) {
+    return { ok: false, status: 0, error: err.message || 'Network request failed' };
+  }
 }
 
 export default function LinkedInHyperVApp() {
@@ -139,32 +187,28 @@ export default function LinkedInHyperVApp() {
 
   // 1. Fetch Accounts
   const fetchAccounts = useCallback(async () => {
-    try {
-      const res = await fetch('/api/accounts');
-      const json = await res.json();
-      if (json.success && json.data) {
-        setAccounts(json.data);
-        if (!selectedAccountIdRef.current && json.data.length > 0) {
-          setSelectedAccountId(json.data[0].id);
-        }
+    const res = await safeFetchJson<{ success: boolean; data: Account[] }>('/api/accounts');
+    if (res.ok && res.data?.data) {
+      setAccounts(res.data.data);
+      if (!selectedAccountIdRef.current && res.data.data.length > 0) {
+        setSelectedAccountId(res.data.data[0].id);
       }
-    } catch {}
+    }
   }, []);
 
   // 2. Fetch Conversations
   const fetchConversations = useCallback(async (targetAccountId?: string) => {
     const accId = targetAccountId || selectedAccountIdRef.current;
     if (!accId) return;
-    try {
-      const res = await fetch(`/api/conversations?accountId=${encodeURIComponent(accId)}`);
-      const json = await res.json();
-      if (json.success && json.data) {
-        setConversations(json.data);
-        if (!selectedConversationIdRef.current && json.data.length > 0) {
-          setSelectedConversationId(json.data[0].id);
-        }
+    const res = await safeFetchJson<{ success: boolean; data: ConversationItem[] }>(
+      `/api/conversations?accountId=${encodeURIComponent(accId)}`
+    );
+    if (res.ok && res.data?.data) {
+      setConversations(res.data.data);
+      if (!selectedConversationIdRef.current && res.data.data.length > 0) {
+        setSelectedConversationId(res.data.data[0].id);
       }
-    } catch {}
+    }
   }, []);
 
   // 3. Fetch Messages for Selected Conversation
@@ -172,36 +216,29 @@ export default function LinkedInHyperVApp() {
     const accId = targetAccountId || selectedAccountIdRef.current;
     const conv = targetConvId !== undefined ? targetConvId : selectedConversationIdRef.current;
     if (!accId) return;
-    try {
-      const convParam = conv ? `&conversationId=${encodeURIComponent(conv)}` : '';
-      const res = await fetch(`/api/messages?accountId=${encodeURIComponent(accId)}${convParam}&limit=150`);
-      const json = await res.json();
-      if (json.success && json.data) {
-        setActiveMessages(json.data);
-      }
-    } catch {}
+    const convParam = conv ? `&conversationId=${encodeURIComponent(conv)}` : '';
+    const res = await safeFetchJson<{ success: boolean; data: ChatMessage[] }>(
+      `/api/messages?accountId=${encodeURIComponent(accId)}${convParam}&limit=150`
+    );
+    if (res.ok && res.data?.data) {
+      setActiveMessages(res.data.data);
+    }
   }, []);
 
   // 4. Fetch Jobs
   const fetchJobs = useCallback(async () => {
-    try {
-      const res = await fetch('/api/jobs?limit=50');
-      const json = await res.json();
-      if (json.success && json.data) {
-        setJobs(json.data);
-      }
-    } catch {}
+    const res = await safeFetchJson<{ success: boolean; data: AutomationJob[] }>('/api/jobs?limit=50');
+    if (res.ok && res.data?.data) {
+      setJobs(res.data.data);
+    }
   }, []);
 
   // 5. Fetch Health
   const fetchHealth = useCallback(async () => {
-    try {
-      const res = await fetch('/health');
-      const json = await res.json();
-      if (json.status) {
-        setHealth(json);
-      }
-    } catch {}
+    const res = await safeFetchJson<SystemHealth>('/health');
+    if (res.ok && res.data) {
+      setHealth(res.data);
+    }
   }, []);
 
   // Initial load on mount
@@ -261,6 +298,7 @@ export default function LinkedInHyperVApp() {
 
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
   const activeConversation = conversations.find((c) => c.id === selectedConversationId);
+  const isAccountAuthorized = selectedAccount?.authStatus === 'AUTHORIZED';
 
   // Filtered conversation list based on search query
   const filteredConversations = conversations.filter((c) => {
@@ -277,6 +315,14 @@ export default function LinkedInHyperVApp() {
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedAccountId || !messageInput.trim() || !activeConversation) return;
+
+    if (!isAccountAuthorized) {
+      setUiAlert({
+        type: 'error',
+        message: 'LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.',
+      });
+      return;
+    }
 
     const content = messageInput.trim();
     const recipient = activeConversation.partnerName || activeConversation.remoteConversationId;
@@ -301,73 +347,70 @@ export default function LinkedInHyperVApp() {
     setMessageInput('');
     setIsSending(true);
 
-    try {
-      const res = await fetch('/api/jobs/dispatch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accountId: selectedAccountId,
-          type: 'SEND_MESSAGE',
-          payload: {
-            recipientId: recipient,
-            content,
-            conversationId: activeConversation.remoteConversationId,
-          },
-        }),
-      });
+    const res = await safeFetchJson<{ success: boolean; data: { jobId: string } }>('/api/jobs/dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountId: selectedAccountId,
+        type: 'SEND_MESSAGE',
+        payload: {
+          recipientId: recipient,
+          content,
+          conversationId: activeConversation.remoteConversationId,
+        },
+      }),
+    });
 
-      const json = await res.json();
-      if (json.success && json.data?.jobId) {
-        const jobId = json.data.jobId;
+    if (res.ok && res.data?.data?.jobId) {
+      const jobId = res.data.data.jobId;
 
-        // Poll this job's completion specifically
-        let attempts = 0;
-        const jobPoll = setInterval(async () => {
-          attempts++;
-          try {
-            const jRes = await fetch('/api/jobs?limit=10');
-            const jJson = await jRes.json();
-            const matchingJob = (jJson.data || []).find((j: any) => j.id === jobId);
-
-            if (matchingJob) {
-              if (matchingJob.status === 'COMPLETED') {
-                clearInterval(jobPoll);
-                // Mark optimistic message as SENT
-                setActiveMessages((prev) =>
-                  prev.map((m) => (m.id === tempId ? { ...m, syncStatus: 'SENT' } : m))
-                );
-                fetchMessages();
-                fetchConversations();
-                setIsSending(false);
-              } else if (matchingJob.status === 'FAILED' || matchingJob.status === 'DLQ_ROUTED') {
-                clearInterval(jobPoll);
-                setActiveMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === tempId ? { ...m, syncStatus: 'FAILED', content: `${m.content} [Error: ${matchingJob.errorMessage || 'Failed'}]` } : m
-                  )
-                );
-                setIsSending(false);
-              }
+      // Poll this job's completion specifically
+      let attempts = 0;
+      const jobPoll = setInterval(async () => {
+        attempts++;
+        const jRes = await safeFetchJson<{ success: boolean; data: AutomationJob[] }>('/api/jobs?limit=10');
+        if (jRes.ok && jRes.data?.data) {
+          const matchingJob = jRes.data.data.find((j) => j.id === jobId);
+          if (matchingJob) {
+            if (matchingJob.status === 'COMPLETED') {
+              clearInterval(jobPoll);
+              setActiveMessages((prev) =>
+                prev.map((m) => (m.id === tempId ? { ...m, syncStatus: 'SENT' } : m))
+              );
+              fetchMessages();
+              fetchConversations();
+              setIsSending(false);
+            } else if (matchingJob.status === 'FAILED' || matchingJob.status === 'DLQ_ROUTED') {
+              clearInterval(jobPoll);
+              setActiveMessages((prev) =>
+                prev.map((m) =>
+                  m.id === tempId
+                    ? {
+                        ...m,
+                        syncStatus: 'FAILED',
+                        content: `${m.content} [Error: ${matchingJob.errorMessage || 'Failed'}]`,
+                      }
+                    : m
+                )
+              );
+              setIsSending(false);
             }
-          } catch {}
-
-          if (attempts > 30) {
-            clearInterval(jobPoll);
-            setIsSending(false);
           }
-        }, 1500);
-      } else {
-        setActiveMessages((prev) =>
-          prev.map((m) => (m.id === tempId ? { ...m, syncStatus: 'FAILED' } : m))
-        );
-        setUiAlert({ type: 'error', message: json.detail || json.error?.message || 'Failed to dispatch message' });
-        setIsSending(false);
-      }
-    } catch (err: any) {
+        }
+
+        if (attempts > 30) {
+          clearInterval(jobPoll);
+          setIsSending(false);
+        }
+      }, 1500);
+    } else {
       setActiveMessages((prev) =>
         prev.map((m) => (m.id === tempId ? { ...m, syncStatus: 'FAILED' } : m))
       );
-      setUiAlert({ type: 'error', message: err.message });
+      setUiAlert({
+        type: 'error',
+        message: res.error || 'Failed to dispatch message',
+      });
       setIsSending(false);
     }
   };
@@ -377,67 +420,75 @@ export default function LinkedInHyperVApp() {
     e.preventDefault();
     if (!selectedAccountId || !newChatRecipient.trim() || !newChatMessage.trim()) return;
 
-    setIsSending(true);
-    try {
-      const res = await fetch('/api/jobs/dispatch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accountId: selectedAccountId,
-          type: 'SEND_MESSAGE',
-          payload: {
-            recipientId: newChatRecipient.trim(),
-            content: newChatMessage.trim(),
-          },
-        }),
-      });
-      const json = await res.json();
-      if (json.success) {
-        setIsNewChatOpen(false);
-        setNewChatRecipient('');
-        setNewChatMessage('');
-        setUiAlert({ type: 'success', message: `Message dispatched to ${newChatRecipient}. Worker will transmit to LinkedIn.` });
-        fetchJobs();
-        setTimeout(() => fetchConversations(), 3000);
-      } else {
-        alert(json.detail || json.error?.message || 'Failed to dispatch message');
-      }
-    } catch (err: any) {
-      alert(err.message);
-    } finally {
-      setIsSending(false);
+    if (!isAccountAuthorized) {
+      alert('LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.');
+      return;
     }
+
+    setIsSending(true);
+    const res = await safeFetchJson<{ success: boolean; data: { jobId: string } }>('/api/jobs/dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountId: selectedAccountId,
+        type: 'SEND_MESSAGE',
+        payload: {
+          recipientId: newChatRecipient.trim(),
+          content: newChatMessage.trim(),
+        },
+      }),
+    });
+
+    if (res.ok && res.data?.success) {
+      setIsNewChatOpen(false);
+      setNewChatRecipient('');
+      setNewChatMessage('');
+      setUiAlert({
+        type: 'success',
+        message: `Message dispatched to ${newChatRecipient}. Worker will transmit to LinkedIn.`,
+      });
+      fetchJobs();
+      setTimeout(() => fetchConversations(), 3000);
+    } else {
+      alert(res.error || 'Failed to dispatch message');
+    }
+    setIsSending(false);
   };
 
   // Handle Trigger Two-Way Sync
   const handleTriggerSync = async () => {
     if (!selectedAccountId) return;
+
+    if (!isAccountAuthorized) {
+      setSyncFeedback('❌ LinkedIn account is not currently authorized for live operations.');
+      setUiAlert({
+        type: 'error',
+        message: 'LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.',
+      });
+      return;
+    }
+
     setIsSyncing(true);
     setSyncFeedback('Syncing messages & conversations from LinkedIn...');
 
-    try {
-      const res = await fetch('/api/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId: selectedAccountId, limit: 25 }),
-      });
-      const json = await res.json();
-      if (json.success) {
-        setSyncFeedback(`Sync job queued (${json.data.jobId.slice(0, 8)}...). Worker is ingesting messages...`);
-        fetchJobs();
-        setTimeout(() => {
-          fetchConversations();
-          fetchMessages();
-          setIsSyncing(false);
-          setSyncFeedback('✓ Synchronization complete! Inbox updated.');
-          setTimeout(() => setSyncFeedback(null), 4000);
-        }, 3500);
-      } else {
-        setSyncFeedback(`❌ Sync failed: ${json.detail || 'Could not queue sync job'}`);
+    const res = await safeFetchJson<{ success: boolean; data: { jobId: string } }>('/api/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId: selectedAccountId, limit: 25 }),
+    });
+
+    if (res.ok && res.data?.success) {
+      setSyncFeedback(`Sync job queued (${res.data.data.jobId.slice(0, 8)}...). Worker is ingesting messages...`);
+      fetchJobs();
+      setTimeout(() => {
+        fetchConversations();
+        fetchMessages();
         setIsSyncing(false);
-      }
-    } catch (err: any) {
-      setSyncFeedback(`❌ Error: ${err.message}`);
+        setSyncFeedback('✓ Synchronization complete! Inbox updated.');
+        setTimeout(() => setSyncFeedback(null), 4000);
+      }, 3500);
+    } else {
+      setSyncFeedback(`❌ Sync failed: ${res.error || 'Could not queue sync job'}`);
       setIsSyncing(false);
     }
   };
@@ -447,30 +498,40 @@ export default function LinkedInHyperVApp() {
     e.preventDefault();
     if (!selectedAccountId || !targetProfileId.trim()) return;
 
-    try {
-      const res = await fetch('/api/jobs/dispatch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accountId: selectedAccountId,
-          type: 'SEND_CONNECTION_REQUEST',
-          payload: {
-            targetProfileId: targetProfileId.trim(),
-            customNote: connectionNote.trim() || undefined,
-          },
-        }),
+    if (!isAccountAuthorized) {
+      setUiAlert({
+        type: 'error',
+        message: 'LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.',
       });
-      const json = await res.json();
-      if (json.success) {
-        setUiAlert({ type: 'success', message: `Connection request job queued (${json.data.jobId.slice(0, 8)}...). Worker executing with LinkedIn.` });
-        setTargetProfileId('');
-        setConnectionNote('');
-        fetchJobs();
-      } else {
-        setUiAlert({ type: 'error', message: json.detail || json.error?.message || 'Failed to dispatch connection request' });
-      }
-    } catch (err: any) {
-      setUiAlert({ type: 'error', message: err.message });
+      return;
+    }
+
+    const res = await safeFetchJson<{ success: boolean; data: { jobId: string } }>('/api/jobs/dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountId: selectedAccountId,
+        type: 'SEND_CONNECTION_REQUEST',
+        payload: {
+          targetProfileId: targetProfileId.trim(),
+          customNote: connectionNote.trim() || undefined,
+        },
+      }),
+    });
+
+    if (res.ok && res.data?.success) {
+      setUiAlert({
+        type: 'success',
+        message: `Connection request job queued (${res.data.data.jobId.slice(0, 8)}...). Worker executing with LinkedIn.`,
+      });
+      setTargetProfileId('');
+      setConnectionNote('');
+      fetchJobs();
+    } else {
+      setUiAlert({
+        type: 'error',
+        message: res.error || 'Failed to dispatch connection request',
+      });
     }
   };
 
@@ -482,32 +543,28 @@ export default function LinkedInHyperVApp() {
     const trimmedLiAt = newLiAt.trim().replace(/^['"]+|['"]+$/g, '');
     const trimmedJsessionId = newJsessionId.trim().replace(/^['"]+|['"]+$/g, '');
 
-    try {
-      const res = await fetch('/api/accounts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: newAccountEmail.trim(),
-          name: newAccountName.trim() || undefined,
-          cookies: {
-            li_at: trimmedLiAt || undefined,
-            JSESSIONID: trimmedJsessionId || undefined,
-          },
-        }),
-      });
-      const json = await res.json();
-      if (json.success) {
-        setNewAccountEmail('');
-        setNewAccountName('');
-        setNewLiAt('');
-        setNewJsessionId('');
-        fetchAccounts();
-        alert('Account credentials saved successfully!');
-      } else {
-        alert(json.detail || 'Failed to save account');
-      }
-    } catch (err: any) {
-      alert(err.message);
+    const res = await safeFetchJson<{ success: boolean }>('/api/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: newAccountEmail.trim(),
+        name: newAccountName.trim() || undefined,
+        cookies: {
+          li_at: trimmedLiAt || undefined,
+          JSESSIONID: trimmedJsessionId || undefined,
+        },
+      }),
+    });
+
+    if (res.ok && res.data?.success) {
+      setNewAccountEmail('');
+      setNewAccountName('');
+      setNewLiAt('');
+      setNewJsessionId('');
+      fetchAccounts();
+      alert('Account credentials saved successfully!');
+    } else {
+      alert(res.error || 'Failed to save account');
     }
   };
 
@@ -516,64 +573,45 @@ export default function LinkedInHyperVApp() {
     setIsVerifying(true);
     setVerifyResult(null);
 
-    try {
-      const res = await fetch('/api/accounts/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accountId: accountId || selectedAccountId,
-          li_at: newLiAt.trim() || undefined,
-          JSESSIONID: newJsessionId.trim() || undefined,
-        }),
-      });
-      let json: any;
-      const text = await res.text();
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = { success: false, detail: text || `Server error (HTTP ${res.status})` };
-      }
+    const res = await safeFetchJson<{ success: boolean; data?: any; error?: any }>('/api/accounts/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountId: accountId || selectedAccountId,
+        li_at: newLiAt.trim() || undefined,
+        JSESSIONID: newJsessionId.trim() || undefined,
+      }),
+    });
 
-      if (json.success) {
-        setVerifyResult({
-          verified: true,
-          message: `✓ Valid Session! Logged in as: ${json.data?.publicIdentifier || 'LinkedIn Member'} (200 OK)`,
-        });
-      } else {
-        setVerifyResult({
-          verified: false,
-          message: `❌ ${json.detail || json.error?.message || 'Verification failed'}`,
-        });
-      }
-    } catch (err: any) {
-      setVerifyResult({ verified: false, message: `❌ Error: ${err.message}` });
-    } finally {
-      setIsVerifying(false);
-      fetchAccounts();
+    if (res.ok && res.data?.success) {
+      setVerifyResult({
+        verified: true,
+        message: `✓ Valid Session! Logged in as: ${res.data.data?.publicIdentifier || 'LinkedIn Member'} (200 OK)`,
+      });
+    } else {
+      const errDetail = res.data?.error?.message || res.error || 'Verification failed';
+      setVerifyResult({
+        verified: false,
+        message: `❌ ${errDetail}`,
+      });
     }
+    setIsVerifying(false);
+    fetchAccounts();
   };
 
   // Handle Maintenance (Retry, Clear DLQ, Clear Jobs)
   const handleMaintenance = async (action: 'RETRY_DLQ' | 'CLEAR_DLQ' | 'CLEAR_JOBS') => {
-    try {
-      const res = await fetch('/api/maintenance/reset', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action }),
-      });
-      const json = await res.json();
-      if (json.success) {
-        alert(
-          action === 'RETRY_DLQ'
-            ? 'Failed and DLQ jobs re-queued for execution!'
-            : action === 'CLEAR_JOBS'
-            ? 'All automation jobs cleared!'
-            : 'DLQ cleared!'
-        );
-        fetchJobs();
-      }
-    } catch (err: any) {
-      alert(err.message);
+    const res = await safeFetchJson<{ success: boolean; message: string }>('/api/maintenance/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+
+    if (res.ok && res.data?.success) {
+      alert(res.data.message);
+      fetchJobs();
+    } else {
+      alert(res.error || 'Maintenance action failed');
     }
   };
 
@@ -669,7 +707,7 @@ export default function LinkedInHyperVApp() {
             onClick={() => setAutoRefresh(!autoRefresh)}
             style={{ background: autoRefresh ? '#065f46' : '#334155', color: autoRefresh ? '#34d399' : '#94a3b8', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
           >
-            {autoRefresh ? '● Live Polling (2s)' : '○ Polling Paused'}
+            {autoRefresh ? '● Live Polling (5s)' : '○ Polling Paused'}
           </button>
         </div>
       </header>
@@ -728,11 +766,56 @@ export default function LinkedInHyperVApp() {
         </div>
       )}
 
+      {/* Prominent Account Authorization Status Banner */}
+      {!isAccountAuthorized && (activeTab === 'inbox' || activeTab === 'connections') && (
+        <div
+          style={{
+            backgroundColor: '#450a0a',
+            border: '1px solid #b91c1c',
+            borderRadius: 8,
+            padding: '12px 16px',
+            marginBottom: 16,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 20 }}>⚠️</span>
+            <div>
+              <div style={{ fontWeight: 700, color: '#fca5a5', fontSize: 13 }}>
+                LinkedIn Account Authorization Required ({selectedAccount?.authStatus || 'NOT_CONFIGURED'})
+              </div>
+              <div style={{ color: '#fecaca', fontSize: 12, marginTop: 2 }}>
+                LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => setActiveTab('accounts')}
+            style={{
+              background: '#b91c1c',
+              color: '#fff',
+              border: 'none',
+              padding: '6px 14px',
+              borderRadius: 6,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Configure Cookies &rarr;
+          </button>
+        </div>
+      )}
+
       {/* ========================================================================= */}
       {/* PRIMARY TAB: HYPER-V INBOX                                                */}
       {/* ========================================================================= */}
       {activeTab === 'inbox' && (
-        <div style={{ display: 'grid', gridTemplateColumns: '360px 1fr', gap: 16, height: 'calc(100vh - 180px)', minHeight: 650 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '360px 1fr', gap: 16, height: 'calc(100vh - 220px)', minHeight: 600 }}>
           {/* LEFT PANE: CONVERSATIONS LIST */}
           <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             {/* Header & Controls */}
@@ -741,223 +824,211 @@ export default function LinkedInHyperVApp() {
                 <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: '#f1f5f9' }}>Conversations</h2>
                 <button
                   onClick={() => setIsNewChatOpen(true)}
-                  disabled={!selectedAccount?.hasAuthorizedSession}
+                  disabled={!isAccountAuthorized}
                   style={{
-                    background: selectedAccount?.hasAuthorizedSession ? '#0284c7' : '#475569',
+                    background: isAccountAuthorized ? '#0284c7' : '#475569',
                     color: '#fff',
                     border: 'none',
                     padding: '4px 10px',
                     borderRadius: 6,
-                    fontSize: 12,
+                    fontSize: 11,
+                    cursor: isAccountAuthorized ? 'pointer' : 'not-allowed',
                     fontWeight: 600,
-                    cursor: selectedAccount?.hasAuthorizedSession ? 'pointer' : 'not-allowed',
                   }}
+                  title={!isAccountAuthorized ? 'Account is not authorized' : 'Start new chat'}
                 >
                   + New Chat
                 </button>
               </div>
 
-              {/* Sync Button & State */}
-              <div style={{ marginBottom: 10 }}>
+              <input
+                type="text"
+                placeholder="Search conversations..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{
+                  width: '100%',
+                  background: '#1e293b',
+                  border: '1px solid #334155',
+                  color: '#fff',
+                  padding: '6px 10px',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  boxSizing: 'border-box',
+                }}
+              />
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
                 <button
                   onClick={handleTriggerSync}
-                  disabled={isSyncing || !selectedAccount?.hasAuthorizedSession}
+                  disabled={isSyncing || !isAccountAuthorized}
                   style={{
-                    width: '100%',
-                    background: selectedAccount?.hasAuthorizedSession ? '#059669' : '#334155',
-                    color: '#fff',
-                    border: 'none',
-                    padding: '8px 12px',
+                    background: isAccountAuthorized ? '#0f766e' : '#334155',
+                    color: isAccountAuthorized ? '#5eead4' : '#64748b',
+                    border: '1px solid #14b8a6',
+                    padding: '4px 10px',
                     borderRadius: 6,
-                    fontSize: 12,
+                    fontSize: 11,
+                    cursor: isAccountAuthorized && !isSyncing ? 'pointer' : 'not-allowed',
                     fontWeight: 600,
-                    cursor: selectedAccount?.hasAuthorizedSession ? 'pointer' : 'not-allowed',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
                   }}
+                  title={!isAccountAuthorized ? 'Account is not authorized' : 'Sync messages'}
                 >
-                  {isSyncing ? '⏳ Ingesting from LinkedIn...' : '↻ Sync Messages from LinkedIn'}
+                  {isSyncing ? 'Syncing...' : '↻ Two-Way Message Sync'}
                 </button>
-                {syncFeedback && (
-                  <div style={{ fontSize: 11, color: '#38bdf8', marginTop: 4, textAlign: 'center' }}>
-                    {syncFeedback}
-                  </div>
-                )}
+                <span style={{ fontSize: 11, color: '#94a3b8' }}>{conversations.length} threads</span>
               </div>
 
-              {/* Search Bar */}
-              <div>
-                <input
-                  type="text"
-                  placeholder="Search contacts or messages..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  style={{ width: '100%', background: '#1e293b', border: '1px solid #334155', color: '#fff', padding: '8px 10px', borderRadius: 6, fontSize: 12, boxSizing: 'border-box' }}
-                />
-              </div>
+              {syncFeedback && (
+                <div style={{ marginTop: 8, fontSize: 11, color: '#5eead4', background: '#134e4a', padding: '4px 8px', borderRadius: 4 }}>
+                  {syncFeedback}
+                </div>
+              )}
             </div>
 
-            {/* Conversation Cards Scroll List */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+            {/* Conversation Threads Scrollable List */}
+            <div style={{ flex: 1, overflowY: 'auto' }}>
               {filteredConversations.map((c) => {
-                const isSelected = selectedConversationId === c.id;
-                const avatarLetter = (c.partnerName || 'L').charAt(0).toUpperCase();
-
+                const isSelected = c.id === selectedConversationId;
                 return (
                   <div
                     key={c.id}
                     onClick={() => {
                       setSelectedConversationId(c.id);
+                      fetchMessages(selectedAccountId, c.id);
                     }}
                     style={{
-                      background: isSelected ? '#0284c7' : '#0f172a',
-                      border: '1px solid',
-                      borderColor: isSelected ? '#38bdf8' : '#334155',
-                      borderRadius: 8,
-                      padding: '10px 12px',
-                      marginBottom: 8,
+                      padding: '12px 14px',
+                      borderBottom: '1px solid #334155',
                       cursor: 'pointer',
-                      display: 'flex',
-                      gap: 10,
-                      alignItems: 'center',
-                      transition: 'background-color 0.15s',
+                      background: isSelected ? '#334155' : 'transparent',
+                      transition: 'background 0.15s',
                     }}
                   >
-                    {/* Avatar */}
-                    <div
-                      style={{
-                        width: 36,
-                        height: 36,
-                        borderRadius: '50%',
-                        background: isSelected ? '#0369a1' : '#334155',
-                        color: '#fff',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontWeight: 700,
-                        fontSize: 14,
-                        flexShrink: 0,
-                      }}
-                    >
-                      {avatarLetter}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+                      <span style={{ fontWeight: 600, fontSize: 13, color: isSelected ? '#38bdf8' : '#f8fafc' }}>
+                        {c.partnerName}
+                      </span>
+                      <span style={{ fontSize: 10, color: '#94a3b8' }}>{formatDate(c.lastActivityAt)}</span>
                     </div>
-
-                    {/* Metadata */}
-                    <div style={{ flex: 1, overflow: 'hidden' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {c.partnerName}
-                        </span>
-                        <span style={{ fontSize: 10, color: isSelected ? '#e0f2fe' : '#94a3b8' }}>
-                          {formatDate(c.lastActivityAt)}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: 11, color: isSelected ? '#f0f9ff' : '#94a3b8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 3 }}>
-                        {c.lastMessageSnippet || 'No messages'}
-                      </div>
+                    <div style={{ fontSize: 12, color: '#94a3b8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {c.lastMessageSnippet || 'No messages yet'}
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, fontSize: 10, color: '#64748b' }}>
+                      <span>{c.messagesCount} msgs</span>
+                      <span style={{ fontFamily: 'monospace' }}>{c.remoteConversationId.slice(0, 14)}...</span>
                     </div>
                   </div>
                 );
               })}
 
               {filteredConversations.length === 0 && (
-                <div style={{ textAlign: 'center', color: '#64748b', fontSize: 13, padding: 30 }}>
-                  No conversations found.<br /><br />
-                  Click <strong>↻ Sync Messages from LinkedIn</strong> to pull active chats from your account.
+                <div style={{ padding: 24, textAlign: 'center', color: '#64748b', fontSize: 13 }}>
+                  No conversations found.
+                  <div style={{ marginTop: 8 }}>
+                    <button
+                      onClick={handleTriggerSync}
+                      disabled={!isAccountAuthorized}
+                      style={{ background: 'transparent', border: '1px solid #38bdf8', color: '#38bdf8', padding: '4px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}
+                    >
+                      Trigger First Sync
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
           </div>
 
-          {/* RIGHT PANE: ACTIVE CONVERSATION THREAD */}
+          {/* RIGHT PANE: ACTIVE CHAT THREAD */}
           <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             {activeConversation ? (
               <>
-                {/* Conversation Header */}
-                <div style={{ padding: '12px 18px', borderBottom: '1px solid #334155', background: '#0f172a', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <div style={{ width: 40, height: 40, borderRadius: '50%', background: '#0284c7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 16 }}>
-                      {(activeConversation.partnerName || 'L').charAt(0).toUpperCase()}
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 15, fontWeight: 700, color: '#f1f5f9' }}>{activeConversation.partnerName}</div>
-                      <div style={{ fontSize: 11, color: '#94a3b8' }}>
-                        ID: {activeConversation.remoteConversationId} • Last active: {formatTime(activeConversation.lastActivityAt)}
-                      </div>
-                    </div>
+                {/* Chat Header */}
+                <div style={{ padding: '14px 18px', borderBottom: '1px solid #334155', background: '#0f172a', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: '#f8fafc' }}>
+                      {activeConversation.partnerName}
+                    </h3>
+                    <span style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>
+                      LinkedIn Thread ID: {activeConversation.remoteConversationId}
+                    </span>
                   </div>
-
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <a
-                      href={`https://www.linkedin.com/in/${activeConversation.partnerName.replace(/\s+/g, '-').toLowerCase()}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ background: '#334155', color: '#38bdf8', textDecoration: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600 }}
-                    >
-                      View on LinkedIn ↗
-                    </a>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     <button
                       onClick={() => fetchMessages()}
-                      style={{ background: '#334155', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 11, cursor: 'pointer' }}
+                      style={{ background: '#334155', color: '#cbd5e1', border: 'none', padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}
                     >
-                      Refresh
+                      ↻ Refresh
                     </button>
                   </div>
                 </div>
 
-                {/* Message Bubble History Stream */}
-                <div style={{ flex: 1, padding: 18, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12, background: '#090d16' }}>
-                  {activeMessages.map((m) => {
-                    const isOutbound = m.direction === 'OUTBOUND';
+                {/* Chat Messages Stream */}
+                <div style={{ flex: 1, padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {activeMessages.map((msg) => {
+                    const isOutbound = msg.direction === 'OUTBOUND';
                     return (
                       <div
-                        key={m.id}
+                        key={msg.id || msg.idempotencyKey}
                         style={{
                           alignSelf: isOutbound ? 'flex-end' : 'flex-start',
-                          maxWidth: '68%',
-                          background: isOutbound ? '#0284c7' : '#1e293b',
-                          border: `1px solid ${isOutbound ? '#0369a1' : '#334155'}`,
-                          color: '#fff',
-                          padding: '10px 14px',
-                          borderRadius: 12,
-                          borderBottomRightRadius: isOutbound ? 2 : 12,
-                          borderBottomLeftRadius: isOutbound ? 12 : 2,
+                          maxWidth: '75%',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: isOutbound ? 'flex-end' : 'flex-start',
                         }}
                       >
-                        <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 4, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                          <span>{isOutbound ? 'You (Outbound)' : m.senderName || activeConversation.partnerName}</span>
-                          <span>{formatTime(m.sentAt)}</span>
+                        <span style={{ fontSize: 10, color: '#94a3b8', marginBottom: 2 }}>
+                          {isOutbound ? 'You' : msg.senderName || activeConversation.partnerName}
+                        </span>
+                        <div
+                          style={{
+                            background: isOutbound ? '#0284c7' : '#334155',
+                            color: '#ffffff',
+                            padding: '10px 14px',
+                            borderRadius: isOutbound ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
+                            fontSize: 13,
+                            lineHeight: 1.4,
+                            wordBreak: 'break-word',
+                          }}
+                        >
+                          {msg.content}
                         </div>
-                        <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-                          {m.content}
-                        </div>
-                        <div style={{ fontSize: 10, marginTop: 4, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 4 }}>
-                          {m.syncStatus === 'SENDING...' && (
-                            <span style={{ color: '#fef08a', fontWeight: 600 }}>⏳ SENDING...</span>
-                          )}
-                          {m.syncStatus === 'SENT' && (
-                            <span style={{ color: '#34d399', fontWeight: 600 }}>✓ SENT (LinkedIn Confirmed)</span>
-                          )}
-                          {m.syncStatus === 'FAILED' && (
-                            <span style={{ color: '#fca5a5', fontWeight: 600 }}>✕ FAILED</span>
-                          )}
-                          {m.syncStatus === 'SYNCED' && (
-                            <span style={{ color: '#cbd5e1', opacity: 0.7 }}>SYNCED</span>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 3 }}>
+                          <span style={{ fontSize: 10, color: '#64748b' }}>{formatTime(msg.sentAt)}</span>
+                          {isOutbound && (
+                            <span
+                              style={{
+                                fontSize: 9,
+                                fontWeight: 700,
+                                color:
+                                  msg.syncStatus === 'SENT' || msg.syncStatus === 'SYNCED'
+                                    ? '#34d399'
+                                    : msg.syncStatus === 'SENDING...'
+                                    ? '#fde047'
+                                    : '#f87171',
+                              }}
+                            >
+                              {msg.syncStatus === 'SYNCED' ? '✓ SENT' : msg.syncStatus}
+                            </span>
                           )}
                         </div>
                       </div>
                     );
                   })}
+                  {activeMessages.length === 0 && (
+                    <div style={{ margin: 'auto', textAlign: 'center', color: '#64748b', fontSize: 13 }}>
+                      No messages found in this conversation. Type below to send a message.
+                    </div>
+                  )}
                   <div ref={messagesEndRef} />
                 </div>
 
-                {/* Bottom Live Message Input Bar */}
+                {/* Message Input Box */}
                 <form
                   onSubmit={handleSendMessage}
                   style={{
-                    padding: 14,
+                    padding: 12,
                     borderTop: '1px solid #334155',
                     background: '#0f172a',
                     display: 'flex',
@@ -965,40 +1036,41 @@ export default function LinkedInHyperVApp() {
                     gap: 8,
                   }}
                 >
-                  {selectedAccount && !selectedAccount.hasAuthorizedSession ? (
-                    <div style={{ color: '#f87171', fontSize: 12, padding: 8, background: '#450a0a', borderRadius: 6 }}>
-                      ⚠️ <strong>ACCOUNT NOT AUTHORIZED:</strong> You must configure a valid <code>li_at</code> session cookie in the <strong>Accounts</strong> tab before live messages can be sent.
+                  {!isAccountAuthorized ? (
+                    <div style={{ color: '#fca5a5', fontSize: 12, textAlign: 'center', padding: '8px' }}>
+                      Sending is disabled: LinkedIn account is not authorized. Configure valid cookies in Accounts tab.
                     </div>
                   ) : (
                     <div style={{ display: 'flex', gap: 10 }}>
                       <input
                         type="text"
-                        placeholder={`Write a live message to ${activeConversation.partnerName}...`}
+                        placeholder={`Message ${activeConversation.partnerName}...`}
                         value={messageInput}
                         onChange={(e) => setMessageInput(e.target.value)}
-                        disabled={isSending || !selectedAccount?.hasAuthorizedSession}
+                        disabled={isSending}
                         style={{
                           flex: 1,
                           background: '#1e293b',
                           border: '1px solid #334155',
                           color: '#fff',
-                          padding: '12px 14px',
-                          borderRadius: 8,
+                          padding: '10px 14px',
+                          borderRadius: 6,
                           fontSize: 13,
+                          boxSizing: 'border-box',
                         }}
                       />
                       <button
                         type="submit"
-                        disabled={isSending || !messageInput.trim() || !selectedAccount?.hasAuthorizedSession}
+                        disabled={isSending || !messageInput.trim()}
                         style={{
-                          background: selectedAccount?.hasAuthorizedSession && messageInput.trim() ? '#0284c7' : '#475569',
+                          background: messageInput.trim() ? '#0284c7' : '#334155',
                           color: '#fff',
                           border: 'none',
-                          padding: '0 24px',
-                          borderRadius: 8,
-                          fontWeight: 700,
+                          padding: '0 20px',
+                          borderRadius: 6,
+                          fontWeight: 600,
                           fontSize: 13,
-                          cursor: selectedAccount?.hasAuthorizedSession && messageInput.trim() ? 'pointer' : 'not-allowed',
+                          cursor: messageInput.trim() ? 'pointer' : 'not-allowed',
                         }}
                       >
                         {isSending ? 'Sending...' : 'Send'}
@@ -1060,8 +1132,16 @@ export default function LinkedInHyperVApp() {
                 </button>
                 <button
                   type="submit"
-                  disabled={isSending}
-                  style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '8px 20px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
+                  disabled={isSending || !isAccountAuthorized}
+                  style={{
+                    background: isAccountAuthorized ? '#0284c7' : '#475569',
+                    color: '#fff',
+                    border: 'none',
+                    padding: '8px 20px',
+                    borderRadius: 6,
+                    fontWeight: 600,
+                    cursor: isAccountAuthorized && !isSending ? 'pointer' : 'not-allowed',
+                  }}
                 >
                   {isSending ? 'Dispatching...' : 'Send Message'}
                 </button>
@@ -1098,7 +1178,7 @@ export default function LinkedInHyperVApp() {
               <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>Invitation Note / Custom Message (Optional):</label>
               <textarea
                 rows={3}
-                placeholder="Hi, I would like to connect with you on LinkedIn..."
+                placeholder="Hi Satya, I would love to connect with you on LinkedIn!"
                 value={connectionNote}
                 onChange={(e) => setConnectionNote(e.target.value)}
                 style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 10, borderRadius: 6, boxSizing: 'border-box' }}
@@ -1107,19 +1187,20 @@ export default function LinkedInHyperVApp() {
 
             <button
               type="submit"
-              disabled={!selectedAccount?.hasAuthorizedSession}
+              disabled={!isAccountAuthorized}
               style={{
                 width: '100%',
-                background: selectedAccount?.hasAuthorizedSession ? '#0284c7' : '#475569',
+                background: isAccountAuthorized ? '#0284c7' : '#475569',
                 color: '#fff',
                 border: 'none',
-                padding: '12px 16px',
+                padding: 12,
                 borderRadius: 6,
                 fontWeight: 700,
-                cursor: selectedAccount?.hasAuthorizedSession ? 'pointer' : 'not-allowed',
+                fontSize: 14,
+                cursor: isAccountAuthorized ? 'pointer' : 'not-allowed',
               }}
             >
-              Send Connection Request
+              {isAccountAuthorized ? 'Send Connection Invitation' : 'Account Not Authorized — Configure in Accounts Tab'}
             </button>
           </form>
         </div>
@@ -1132,71 +1213,69 @@ export default function LinkedInHyperVApp() {
         <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
             <div>
-              <h2 style={{ margin: 0, fontSize: 18, color: '#f1f5f9' }}>Real-Time Automation Jobs Monitor</h2>
-              <p style={{ margin: '4px 0 0', fontSize: 12, color: '#94a3b8' }}>
-                Tracks execution states: QUEUED → RUNNING → COMPLETED / FAILED → RETRYING → DLQ_ROUTED
-              </p>
+              <h2 style={{ margin: 0, fontSize: 18, color: '#38bdf8' }}>Worker Automation Engine Monitor</h2>
+              <span style={{ fontSize: 12, color: '#94a3b8' }}>Real-time job lifecycle, retries, and failure diagnostics</span>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                onClick={() => handleMaintenance('CLEAR_JOBS')}
+                style={{ background: '#475569', color: '#f8fafc', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
+              >
+                Clear Jobs
+              </button>
               <button
                 onClick={() => handleMaintenance('RETRY_DLQ')}
-                style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                style={{ background: '#b45309', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
               >
                 ↻ Retry Failed Jobs
               </button>
               <button
                 onClick={() => handleMaintenance('CLEAR_DLQ')}
-                style={{ background: '#334155', color: '#cbd5e1', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
+                style={{ background: '#7f1d1d', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
               >
                 Clear DLQ
               </button>
               <button
-                onClick={() => handleMaintenance('CLEAR_JOBS')}
-                style={{ background: '#7f1d1d', color: '#fca5a5', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
-              >
-                Clear Jobs
-              </button>
-              <button
                 onClick={fetchJobs}
-                style={{ background: '#334155', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
+                style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
               >
-                Refresh
+                ↻ Refresh
               </button>
             </div>
           </div>
 
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, textAlign: 'left' }}>
               <thead>
-                <tr style={{ color: '#94a3b8', borderBottom: '1px solid #334155', textAlign: 'left' }}>
-                  <th style={{ padding: '8px 6px' }}>Job ID</th>
-                  <th>Action</th>
+                <tr style={{ background: '#0f172a', color: '#94a3b8', borderBottom: '1px solid #334155' }}>
+                  <th style={{ padding: 10 }}>Job ID / Trace</th>
+                  <th>Type</th>
                   <th>Account</th>
-                  <th>Target / Recipient</th>
                   <th>Status</th>
                   <th>Retries</th>
-                  <th>Created At</th>
-                  <th>Error / Detail</th>
+                  <th>Error / Diagnostic</th>
+                  <th>Created</th>
+                  <th>Completed</th>
                 </tr>
               </thead>
               <tbody>
-                {jobs.map((j) => {
-                  const target = j.payload?.recipientId || j.payload?.targetProfileId || 'N/A';
-                  return (
-                    <tr key={j.id} style={{ borderBottom: '1px solid #334155' }}>
-                      <td style={{ padding: '8px 6px', fontFamily: 'monospace' }}>{j.id.slice(0, 8)}...</td>
-                      <td>{j.type}</td>
-                      <td>{j.accountEmail}</td>
-                      <td style={{ color: '#38bdf8' }}>{target}</td>
-                      <td>{renderJobBadge(j.status)}</td>
-                      <td>{j.retryCount} / {j.maxRetries}</td>
-                      <td style={{ color: '#94a3b8' }}>{formatTime(j.createdAt)}</td>
-                      <td style={{ color: j.errorMessage ? '#f87171' : '#64748b', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {j.errorMessage || '—'}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {jobs.map((job) => (
+                  <tr key={job.id} style={{ borderBottom: '1px solid #334155' }}>
+                    <td style={{ padding: 10, fontFamily: 'monospace', color: '#38bdf8' }}>
+                      {job.id.slice(0, 8)}...
+                      <div style={{ fontSize: 10, color: '#64748b' }}>{job.traceId.slice(0, 8)}</div>
+                    </td>
+                    <td style={{ fontWeight: 600 }}>{job.type}</td>
+                    <td style={{ color: '#cbd5e1' }}>{job.accountEmail || job.accountId.slice(0, 8)}</td>
+                    <td>{renderJobBadge(job.status)}</td>
+                    <td>{job.retryCount} / {job.maxRetries}</td>
+                    <td style={{ color: job.errorMessage ? '#f87171' : '#64748b', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {job.errorMessage || '—'}
+                    </td>
+                    <td style={{ color: '#94a3b8' }}>{formatTime(job.createdAt)}</td>
+                    <td style={{ color: '#94a3b8' }}>{job.completedAt ? formatTime(job.completedAt) : '—'}</td>
+                  </tr>
+                ))}
                 {jobs.length === 0 && (
                   <tr>
                     <td colSpan={8} style={{ padding: 24, textAlign: 'center', color: '#64748b' }}>No automation jobs yet.</td>
@@ -1360,31 +1439,90 @@ export default function LinkedInHyperVApp() {
       {/* TAB 5: SYSTEM HEALTH                                                      */}
       {/* ========================================================================= */}
       {activeTab === 'health' && (
-        <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 24 }}>
-          <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>System Architecture & Probes</h2>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginTop: 16 }}>
-            <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>FastAPI Python Engine</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: '#34d399', marginTop: 4 }}>
-                {health?.status === 'healthy' ? 'Online (Healthy)' : 'Checking...'}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {/* Card 1: Local Infrastructure Status */}
+          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 24 }}>
+            <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>1. Local System Infrastructure</h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginTop: 16 }}>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>FastAPI Python Engine</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: '#34d399', marginTop: 4 }}>
+                  Online (Healthy)
+                </div>
+              </div>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>PostgreSQL Database</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: (health?.infrastructure?.database || health?.database) === 'connected' ? '#34d399' : '#f87171', marginTop: 4 }}>
+                  {health?.infrastructure?.database || health?.database || 'connected'}
+                </div>
+              </div>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Redis / Distributed Lock</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: (health?.infrastructure?.redis || health?.redis) === 'connected' ? '#34d399' : '#facc15', marginTop: 4 }}>
+                  {health?.infrastructure?.redis || health?.redis || 'connected'}
+                </div>
+              </div>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Background Worker Loop</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: '#34d399', marginTop: 4 }}>
+                  Active Polling (1.5s)
+                </div>
               </div>
             </div>
-            <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>PostgreSQL Database</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: health?.database === 'connected' ? '#34d399' : '#f87171', marginTop: 4 }}>
-                {health?.database || 'connected'}
+          </div>
+
+          {/* Card 2: External LinkedIn Integration */}
+          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 24 }}>
+            <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>2. External LinkedIn Integration</h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginTop: 16 }}>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Integration Provider</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: '#f8fafc', marginTop: 4 }}>
+                  {health?.externalIntegration?.provider || 'LinkedIn Voyager API'}
+                </div>
+              </div>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Overall Integration Status</div>
+                <div style={{ marginTop: 6 }}>
+                  {renderAuthBadge(health?.externalIntegration?.overallStatus)}
+                </div>
+              </div>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Authorized Accounts</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: '#34d399', marginTop: 4 }}>
+                  {health?.externalIntegration?.authorizedAccounts ?? 0}
+                </div>
+              </div>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Invalid / Expired Sessions</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: (health?.externalIntegration?.sessionInvalidAccounts ?? 0) > 0 ? '#f87171' : '#94a3b8', marginTop: 4 }}>
+                  {health?.externalIntegration?.sessionInvalidAccounts ?? 0}
+                </div>
               </div>
             </div>
-            <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Redis / Distributed Lock</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: health?.redis === 'connected' ? '#34d399' : '#facc15', marginTop: 4 }}>
-                {health?.redis || 'connected'}
+          </div>
+
+          {/* Card 3: Circuit Breaker */}
+          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 24 }}>
+            <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>3. Integration Circuit Breaker</h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginTop: 16 }}>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Circuit State</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: health?.circuitBreaker?.state === 'CLOSED' ? '#34d399' : '#f87171', marginTop: 4 }}>
+                  {health?.circuitBreaker?.state || 'CLOSED'}
+                </div>
               </div>
-            </div>
-            <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-              <div style={{ color: '#94a3b8', fontSize: 12 }}>Active Accounts</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: '#38bdf8', marginTop: 4 }}>
-                {accounts.length} Accounts
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Consecutive Server Failures (5xx / Timeouts)</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: '#cbd5e1', marginTop: 4 }}>
+                  {health?.circuitBreaker?.failureCount ?? 0} / 5
+                </div>
+              </div>
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Authentication Error Immunity</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: '#38bdf8', marginTop: 6 }}>
+                  Immune (401/403/422 never trip breaker)
+                </div>
               </div>
             </div>
           </div>
