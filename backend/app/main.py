@@ -68,6 +68,17 @@ class ReconnectRequest(BaseModel):
     accountId: str
 
 
+class LinkedInConfigPayload(BaseModel):
+    clientId: str
+    clientSecret: Optional[str] = None
+    redirectUri: Optional[str] = None
+
+
+class DirectTokenAuthPayload(BaseModel):
+    accountId: Optional[str] = None
+    accessToken: str
+
+
 class JobDispatchRequest(BaseModel):
     accountId: str
     type: str
@@ -152,6 +163,59 @@ def get_health(db: Session = Depends(get_db)):
 # Official LinkedIn OAuth 2.0 Endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/api/auth/linkedin/config")
+def get_linkedin_config(db: Session = Depends(get_db)):
+    """Returns current LinkedIn OAuth configuration status without leaking secret."""
+    cfg = oauth_service.get_config(db)
+    return {"success": True, **cfg}
+
+
+@app.post("/api/auth/linkedin/config")
+def save_linkedin_config(payload: LinkedInConfigPayload, db: Session = Depends(get_db)):
+    """Saves LinkedIn Developer App credentials securely with AES-256 encryption."""
+    if not payload.clientId or not payload.clientId.strip():
+        raise HTTPException(status_code=400, detail="Client ID cannot be empty.")
+    updated = oauth_service.save_config(
+        db=db,
+        client_id=payload.clientId,
+        client_secret=payload.clientSecret,
+        redirect_uri=payload.redirectUri,
+    )
+    return {"success": True, "message": "LinkedIn OAuth app configuration saved.", **updated}
+
+
+@app.post("/api/auth/linkedin/token")
+def direct_token_connect(payload: DirectTokenAuthPayload, db: Session = Depends(get_db)):
+    """
+    Directly authorizes an account using a LinkedIn OAuth Bearer Token.
+    Validates token against LinkedIn userinfo and saves encrypted with AES-256.
+    """
+    if not payload.accessToken or not payload.accessToken.strip():
+        raise HTTPException(status_code=400, detail="LinkedIn OAuth access token is required.")
+
+    try:
+        account = oauth_service.direct_token_auth(
+            db=db,
+            account_id=payload.accountId,
+            raw_token=payload.accessToken,
+        )
+        return {
+            "success": True,
+            "message": f"Successfully authorized account '{account.email}' with LinkedIn OAuth token.",
+            "account": {
+                "id": account.id,
+                "email": account.email,
+                "name": account.name,
+                "authStatus": account.authStatus,
+                "avatarUrl": account.avatarUrl,
+            },
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to connect account: {str(exc)}")
+
+
 @app.get("/api/auth/linkedin/connect")
 def connect_linkedin(
     accountId: Optional[str] = None,
@@ -161,11 +225,27 @@ def connect_linkedin(
     """
     Generates official LinkedIn OAuth 2.0 authorization URL.
     Optionally redirects browser directly.
+    Guaranteed to reject missing/placeholder client IDs before redirecting.
     """
-    auth_url, state = oauth_service.build_authorization_url(accountId)
+    if not oauth_service.is_configured(db):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "configured": False,
+                "message": "LinkedIn Developer App is not configured. Please enter your Client ID and Client Secret in App Settings or connect via Direct OAuth Access Token.",
+            },
+        )
+    try:
+        auth_url, state = oauth_service.build_authorization_url(accountId, db=db)
+    except ValueError as err:
+        raise HTTPException(
+            status_code=400,
+            detail={"configured": False, "message": str(err)},
+        )
+
     if redirect:
         return RedirectResponse(auth_url)
-    return {"success": True, "authUrl": auth_url, "state": state}
+    return {"success": True, "configured": True, "authUrl": auth_url, "state": state}
 
 
 @app.get("/api/auth/linkedin/callback")
@@ -190,7 +270,7 @@ def linkedin_callback(
         return RedirectResponse(f"{frontend_base}/?tab=accounts&auth_error=No_authorization_code_received")
 
     try:
-        tokens = oauth_service.exchange_code_for_tokens(code)
+        tokens = oauth_service.exchange_code_for_tokens(code, db=db)
         access_token = tokens.get("access_token")
         refresh_token = tokens.get("refresh_token")
         expires_in = tokens.get("expires_in", 5184000)
@@ -212,8 +292,11 @@ def linkedin_callback(
         account = None
         if account_id:
             account = db.query(LinkedInAccount).filter(LinkedInAccount.id == account_id).first()
+        if not account and linkedin_id:
+            account = db.query(LinkedInAccount).filter(LinkedInAccount.linkedinId == linkedin_id).first()
         if not account and email:
             account = db.query(LinkedInAccount).filter(LinkedInAccount.email == email).first()
+
 
         if not account:
             account = LinkedInAccount(
@@ -279,8 +362,24 @@ def reconnect_account(body: ReconnectRequest, db: Session = Depends(get_db)):
     if not account:
         raise HTTPException(status_code=404, detail=f"LinkedInAccount '{body.accountId}' not found")
 
-    auth_url, state = oauth_service.build_authorization_url(account.id)
-    return {"success": True, "authUrl": auth_url, "state": state}
+    if not oauth_service.is_configured(db):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "configured": False,
+                "message": "LinkedIn Developer App is not configured. Please configure your LinkedIn App in Settings or connect via Direct OAuth Access Token.",
+            },
+        )
+
+    try:
+        auth_url, state = oauth_service.build_authorization_url(account.id, db=db)
+        return {"success": True, "authUrl": auth_url, "state": state}
+    except ValueError as err:
+        raise HTTPException(
+            status_code=400,
+            detail={"configured": False, "message": str(err)},
+        )
+
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +455,13 @@ def create_account(body: CreateAccountRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(account)
 
-    auth_url, state = oauth_service.build_authorization_url(account.id)
+    auth_url = None
+    if oauth_service.is_configured(db):
+        try:
+            auth_url, _ = oauth_service.build_authorization_url(account.id, db=db)
+        except Exception:
+            auth_url = None
+
     return {
         "success": True,
         "data": {
@@ -368,6 +473,7 @@ def create_account(body: CreateAccountRequest, db: Session = Depends(get_db)):
         },
         "authUrl": auth_url,
     }
+
 
 
 # ---------------------------------------------------------------------------

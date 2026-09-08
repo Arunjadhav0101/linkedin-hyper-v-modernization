@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch, Mock
 import httpx
 
 try:
-    from backend.app.models import LinkedInAccount, AutomationJob, Conversation, ChatMessage, DeadLetterQueue
+    from backend.app.models import LinkedInAccount, AutomationJob, Conversation, ChatMessage, DeadLetterQueue, SystemConfig
     from backend.app.voyager import VoyagerClient, VoyagerApiError, MissingIntegrationError, ValidationError
     from backend.app.crypto import encrypt_token, decrypt_token, redact_token
     from backend.app.oauth_service import (
@@ -18,7 +18,7 @@ try:
     from backend.app.worker import JobProcessor
     from backend.app.main import app
 except ImportError:
-    from app.models import LinkedInAccount, AutomationJob, Conversation, ChatMessage, DeadLetterQueue
+    from app.models import LinkedInAccount, AutomationJob, Conversation, ChatMessage, DeadLetterQueue, SystemConfig
     from app.voyager import VoyagerClient, VoyagerApiError, MissingIntegrationError, ValidationError
     from app.crypto import encrypt_token, decrypt_token, redact_token
     from app.oauth_service import (
@@ -67,21 +67,58 @@ def test_crypto_redact_token():
 
 
 # ============================================================================
-# 2. LinkedIn OAuth 2.0 URL Generation
+# 2. LinkedIn OAuth 2.0 URL Generation & Configuration Safeguards
 # ============================================================================
+def test_oauth_unconfigured_fails_safely():
+    """Ensure that build_authorization_url raises ValueError and never returns CONFIG_REQUIRED."""
+    unconfigured_svc = LinkedInOAuthService(client_id="")
+    with pytest.raises(ValueError) as exc_info:
+        unconfigured_svc.build_authorization_url("acc_123")
+    assert "not configured" in str(exc_info.value).lower()
+
+
 def test_oauth_authorization_url_generation():
-    auth_url, state = oauth_service.build_authorization_url("acc_123")
+    """Ensure that build_authorization_url generates correct LinkedIn OAuth URL when configured."""
+    configured_svc = LinkedInOAuthService(
+        client_id="test_linkedin_client_id_999",
+        client_secret="test_secret_abc",
+        redirect_uri="http://localhost:8088/api/auth/linkedin/callback",
+    )
+    auth_url, state = configured_svc.build_authorization_url("acc_123")
     assert "https://www.linkedin.com/oauth/v2/authorization" in auth_url
     assert "response_type=code" in auth_url
-    assert f"client_id={oauth_service.client_id}" in auth_url
+    assert "client_id=test_linkedin_client_id_999" in auth_url
+    assert "CONFIG_REQUIRED" not in auth_url
+    assert "redirect_uri=" in auth_url
     assert "scope=" in auth_url
     assert "state=" in auth_url
     assert len(state) >= 16
 
 
+def test_oauth_config_storage_and_encryption():
+    """Verify storing OAuth configuration encrypts client_secret with AES-256."""
+    db = MagicMock()
+    svc = LinkedInOAuthService()
+    # Mock query returning None for existing configs
+    db.query().filter().first.return_value = None
+
+    cfg = svc.save_config(
+        db=db,
+        client_id="my_app_client_id",
+        client_secret="my_super_secret_key_123",
+        redirect_uri="http://localhost:8088/api/auth/linkedin/callback",
+    )
+    assert cfg["configured"] is True
+    assert cfg["clientId"] == "my_app_client_id"
+    assert cfg["hasSecret"] is True
+    assert db.add.call_count >= 2
+    assert db.commit.called
+
+
 # ============================================================================
 # 3. Canonical Account States & validate_account_auth
 # ============================================================================
+
 def test_validate_account_auth_not_connected():
     db = MagicMock()
     account = LinkedInAccount(
@@ -548,3 +585,42 @@ def test_health_endpoint_separates_infrastructure_from_integration():
     assert "connectedAccounts" in ext
     assert "expiredAccounts" in ext
     assert "overallStatus" in ext
+
+
+# ============================================================================
+# 19. test_api_connect_unconfigured_returns_400_with_clear_error
+# ============================================================================
+def test_api_connect_unconfigured_returns_400_with_clear_error():
+    """Verify that calling /api/auth/linkedin/connect without credentials returns HTTP 400, never redirects with CONFIG_REQUIRED."""
+    client = TestClient(app)
+    with patch.object(oauth_service, "is_configured", return_value=False):
+        res = client.get("/api/auth/linkedin/connect")
+        assert res.status_code == 400
+        detail = res.json()["detail"]
+        assert detail["configured"] is False
+        assert "not configured" in detail["message"].lower()
+
+
+# ============================================================================
+# 20. test_direct_token_auth_flow
+# ============================================================================
+def test_direct_token_auth_flow():
+    """Verify direct token endpoint validates with LinkedIn API and stores token encrypted."""
+    client = TestClient(app)
+    mock_userinfo = {
+        "sub": "mock_member_789",
+        "name": "Alex Developer",
+        "email": f"alex_{int(datetime.utcnow().timestamp())}@developer.com",
+        "picture": "https://media.licdn.com/dms/image/v2/test.jpg",
+    }
+    with patch.object(oauth_service, "fetch_userinfo", return_value=mock_userinfo):
+        res = client.post(
+            "/api/auth/linkedin/token",
+            json={"accessToken": "AQED_TEST_DIRECT_OAUTH_TOKEN_777"},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["success"] is True
+        assert body["account"]["authStatus"] == "CONNECTED"
+        assert body["account"]["name"] == "Alex Developer"
+

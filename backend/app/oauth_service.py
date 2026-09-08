@@ -7,7 +7,8 @@ from typing import Dict, Any, Optional, Tuple, Union
 import httpx
 from sqlalchemy.orm import Session
 
-from .models import LinkedInAccount
+from uuid import uuid4
+from .models import LinkedInAccount, SystemConfig
 from .crypto import encrypt_token, decrypt_token, redact_token
 
 LINKEDIN_CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID", "")
@@ -48,18 +49,128 @@ class LinkedInOAuthService:
         self.redirect_uri = redirect_uri or LINKEDIN_REDIRECT_URI
         self.scopes = scopes or LINKEDIN_OAUTH_SCOPES
 
-    def build_authorization_url(self, account_id: Optional[str] = None) -> Tuple[str, str]:
+    def get_client_credentials(self, db: Optional[Session] = None) -> Tuple[str, str, str]:
+        """
+        Resolves (client_id, client_secret, redirect_uri).
+        Prefers database SystemConfig if available, falling back to environment variables / instance attributes.
+        """
+        client_id = self.client_id or ""
+        client_secret = self.client_secret or ""
+        redirect_uri = self.redirect_uri or "http://localhost:8088/api/auth/linkedin/callback"
+
+        if db:
+            try:
+                cfg_id = db.query(SystemConfig).filter(SystemConfig.key == "LINKEDIN_CLIENT_ID").first()
+                if cfg_id and cfg_id.value and cfg_id.value.strip():
+                    client_id = cfg_id.value.strip()
+
+                cfg_sec = db.query(SystemConfig).filter(SystemConfig.key == "LINKEDIN_CLIENT_SECRET").first()
+                if cfg_sec and cfg_sec.value and cfg_sec.value.strip():
+                    if cfg_sec.isEncrypted:
+                        dec = decrypt_token(cfg_sec.value)
+                        if dec:
+                            client_secret = dec
+                    else:
+                        client_secret = cfg_sec.value.strip()
+
+                cfg_red = db.query(SystemConfig).filter(SystemConfig.key == "LINKEDIN_REDIRECT_URI").first()
+                if cfg_red and cfg_red.value and cfg_red.value.strip():
+                    redirect_uri = cfg_red.value.strip()
+            except Exception:
+                pass
+
+        return client_id, client_secret, redirect_uri
+
+    def get_config(self, db: Optional[Session] = None) -> Dict[str, Any]:
+        """
+        Returns sanitized configuration state for frontend and health checks.
+        Never exposes the secret in plaintext.
+        """
+        client_id, client_secret, redirect_uri = self.get_client_credentials(db)
+        is_cfg = bool(client_id and client_id not in ("CONFIG_REQUIRED", "", "[NOT_CONFIGURED]"))
+        has_secret = bool(client_secret and client_secret not in ("CONFIG_REQUIRED", "", "[NOT_CONFIGURED]"))
+
+        return {
+            "configured": is_cfg and has_secret,
+            "clientId": client_id if is_cfg else None,
+            "hasSecret": has_secret,
+            "redirectUri": redirect_uri,
+            "scopes": self.scopes,
+        }
+
+    def is_configured(self, db: Optional[Session] = None) -> bool:
+        client_id, _, _ = self.get_client_credentials(db)
+        return bool(client_id and client_id not in ("CONFIG_REQUIRED", "", "[NOT_CONFIGURED]"))
+
+    def save_config(
+        self,
+        db: Session,
+        client_id: str,
+        client_secret: Optional[str] = None,
+        redirect_uri: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Saves OAuth app configuration into SystemConfig with AES-256 encrypted secret.
+        """
+        clean_id = client_id.strip() if client_id else ""
+        if clean_id:
+            cfg_id = db.query(SystemConfig).filter(SystemConfig.key == "LINKEDIN_CLIENT_ID").first()
+            if not cfg_id:
+                cfg_id = SystemConfig(key="LINKEDIN_CLIENT_ID", value=clean_id, isEncrypted=False)
+                db.add(cfg_id)
+            else:
+                cfg_id.value = clean_id
+            self.client_id = clean_id
+
+        if client_secret and client_secret.strip():
+            clean_secret = client_secret.strip()
+            enc_secret = encrypt_token(clean_secret)
+            cfg_sec = db.query(SystemConfig).filter(SystemConfig.key == "LINKEDIN_CLIENT_SECRET").first()
+            if not cfg_sec:
+                cfg_sec = SystemConfig(key="LINKEDIN_CLIENT_SECRET", value=enc_secret, isEncrypted=True)
+                db.add(cfg_sec)
+            else:
+                cfg_sec.value = enc_secret
+                cfg_sec.isEncrypted = True
+            self.client_secret = clean_secret
+
+        if redirect_uri and redirect_uri.strip():
+            clean_uri = redirect_uri.strip()
+            cfg_red = db.query(SystemConfig).filter(SystemConfig.key == "LINKEDIN_REDIRECT_URI").first()
+            if not cfg_red:
+                cfg_red = SystemConfig(key="LINKEDIN_REDIRECT_URI", value=clean_uri, isEncrypted=False)
+                db.add(cfg_red)
+            else:
+                cfg_red.value = clean_uri
+            self.redirect_uri = clean_uri
+
+        db.commit()
+        return self.get_config(db)
+
+    def build_authorization_url(
+        self,
+        account_id: Optional[str] = None,
+        db: Optional[Session] = None,
+    ) -> Tuple[str, str]:
         """
         Builds the official LinkedIn OAuth 2.0 authorization URL.
+        Guarantees that unconfigured / placeholder client IDs are rejected before reaching LinkedIn.
         Returns: (authorization_url, state)
         """
+        client_id, _, redirect_uri = self.get_client_credentials(db)
+        if not client_id or client_id in ("CONFIG_REQUIRED", "", "[NOT_CONFIGURED]"):
+            raise ValueError(
+                "LinkedIn Developer App Client ID is not configured. "
+                "Please configure your Client ID and Client Secret in App Settings."
+            )
+
         nonce = secrets.token_urlsafe(16)
         state_payload = f"{account_id or 'new'}:{nonce}"
 
         params = {
             "response_type": "code",
-            "client_id": self.client_id or "CONFIG_REQUIRED",
-            "redirect_uri": self.redirect_uri,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
             "state": state_payload,
             "scope": self.scopes,
         }
@@ -67,21 +178,22 @@ class LinkedInOAuthService:
         auth_url = f"{self.AUTH_URL}?{query_string}"
         return auth_url, state_payload
 
-    def exchange_code_for_tokens(self, code: str) -> Dict[str, Any]:
+    def exchange_code_for_tokens(self, code: str, db: Optional[Session] = None) -> Dict[str, Any]:
         """
         Exchanges authorization code for access and refresh tokens.
         """
-        if not self.client_id or not self.client_secret:
+        client_id, client_secret, redirect_uri = self.get_client_credentials(db)
+        if not client_id or not client_secret:
             raise ValueError(
-                "LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET must be configured in server environment."
+                "LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET must be configured in server environment or database."
             )
 
         payload = {
             "grant_type": "authorization_code",
             "code": code,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "redirect_uri": self.redirect_uri,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
         }
 
         with httpx.Client(timeout=20.0) as client:
@@ -111,8 +223,80 @@ class LinkedInOAuthService:
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             if resp.status_code != 200:
-                raise ValueError(f"Failed to fetch userinfo from LinkedIn (HTTP {resp.status_code})")
+                try:
+                    err_json = resp.json()
+                    err_detail = err_json.get("message") or err_json.get("error_description") or f"HTTP {resp.status_code}"
+                except Exception:
+                    err_detail = f"HTTP {resp.status_code}"
+                raise ValueError(f"Failed to fetch user profile from LinkedIn ({err_detail})")
             return resp.json()
+
+    def direct_token_auth(
+        self,
+        db: Session,
+        account_id: Optional[str],
+        raw_token: str,
+    ) -> LinkedInAccount:
+        """
+        Directly authorizes an account with a developer OAuth 2.0 Bearer token.
+        Validates token against LinkedIn userinfo endpoint, retrieves identity,
+        and saves token encrypted with AES-256.
+        """
+        clean_token = raw_token.strip()
+        if not clean_token:
+            raise ValueError("LinkedIn OAuth Access Token cannot be empty.")
+
+        # Validate with LinkedIn API
+        userinfo = self.fetch_userinfo(clean_token)
+        email = userinfo.get("email") or f"{userinfo.get('sub', 'member')}@linkedin.oauth"
+        name = userinfo.get("name") or f"{userinfo.get('given_name', '')} {userinfo.get('family_name', '')}".strip()
+        linkedin_id = userinfo.get("sub")
+        picture = userinfo.get("picture")
+
+        account = None
+        if account_id:
+            account = db.query(LinkedInAccount).filter(LinkedInAccount.id == account_id).first()
+        if not account and linkedin_id:
+            account = db.query(LinkedInAccount).filter(LinkedInAccount.linkedinId == linkedin_id).first()
+        if not account and email:
+            account = db.query(LinkedInAccount).filter(LinkedInAccount.email == email).first()
+
+
+        encrypted_tok = encrypt_token(clean_token)
+        expires_at = datetime.utcnow() + timedelta(days=60)
+
+        if not account:
+            account = LinkedInAccount(
+                id=str(uuid4()),
+                email=email,
+                name=name or "LinkedIn Member",
+                linkedinId=linkedin_id,
+                avatarUrl=picture,
+                authType="OAUTH2",
+                authStatus="CONNECTED",
+                status="ACTIVE",
+                encryptedAccessToken=encrypted_tok,
+                tokenExpiresAt=expires_at,
+                tokenScope="openid profile email",
+            )
+            db.add(account)
+        else:
+            if name:
+                account.name = name
+            if linkedin_id:
+                account.linkedinId = linkedin_id
+            if picture:
+                account.avatarUrl = picture
+            account.authType = "OAUTH2"
+            account.authStatus = "CONNECTED"
+            account.status = "ACTIVE"
+            account.encryptedAccessToken = encrypted_tok
+            account.tokenExpiresAt = expires_at
+            account.tokenScope = "openid profile email"
+
+        db.commit()
+        db.refresh(account)
+        return account
 
     def refresh_access_token(self, db: Session, account: LinkedInAccount) -> bool:
         """
@@ -125,14 +309,15 @@ class LinkedInOAuthService:
         if not refresh_token:
             return False
 
-        if not self.client_id or not self.client_secret:
+        client_id, client_secret, redirect_uri = self.get_client_credentials(db)
+        if not client_id or not client_secret:
             return False
 
         payload = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
+            "client_id": client_id,
+            "client_secret": client_secret,
         }
 
         try:
@@ -161,6 +346,7 @@ class LinkedInOAuthService:
 
 
 oauth_service = LinkedInOAuthService()
+
 
 
 def validate_account_auth(

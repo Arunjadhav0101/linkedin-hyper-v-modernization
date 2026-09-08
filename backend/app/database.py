@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from uuid import uuid4
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from .models import Base, LinkedInAccount
+from .models import Base, LinkedInAccount, SystemConfig
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",

@@ -130,3 +130,13 @@ class DeadLetterQueue(Base):
     errorMessage = Column(Text, nullable=False)
     retryCount = Column(Integer, default=0)
     routedAt = Column(DateTime, default=datetime.utcnow)
+
+
+class SystemConfig(Base):
+    __tablename__ = "SystemConfig"
+
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=False)
+    isEncrypted = Column(Boolean, default=False)
+    updatedAt = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+

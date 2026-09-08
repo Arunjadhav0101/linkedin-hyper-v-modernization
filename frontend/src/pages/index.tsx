@@ -166,9 +166,31 @@ export default function LinkedInHyperVApp() {
   const [newAccountName, setNewAccountName] = useState('');
   const [isConnecting, setIsConnecting] = useState(false);
 
+  // LinkedIn OAuth App Settings & Direct Token Modal
+  const [isOAuthConfigOpen, setIsOAuthConfigOpen] = useState(false);
+  const [oauthModalTab, setOauthModalTab] = useState<'app_credentials' | 'direct_token'>('app_credentials');
+  const [oauthConfigState, setOAuthConfigState] = useState<{
+    configured: boolean;
+    clientId?: string | null;
+    hasSecret?: boolean;
+    redirectUri?: string;
+  }>({
+    configured: false,
+    clientId: null,
+    hasSecret: false,
+    redirectUri: 'http://localhost:8088/api/auth/linkedin/callback',
+  });
+  const [inputClientId, setInputClientId] = useState('');
+  const [inputClientSecret, setInputClientSecret] = useState('');
+  const [isSavingOAuthConfig, setIsSavingOAuthConfig] = useState(false);
+  const [directTokenInput, setDirectTokenInput] = useState('');
+  const [isAuthorizingToken, setIsAuthorizingToken] = useState(false);
+  const [copiedRedirect, setCopiedRedirect] = useState(false);
+
   // UI status
   const [isSending, setIsSending] = useState(false);
-  const [uiAlert, setUiAlert] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+  const [uiAlert, setUiAlert] = useState<{ type: 'success' | 'error' | 'info' | 'warning'; message: string } | null>(null);
+
 
   const selectedAccountIdRef = useRef(selectedAccountId);
   selectedAccountIdRef.current = selectedAccountId;
@@ -264,11 +286,34 @@ export default function LinkedInHyperVApp() {
     }
   }, []);
 
+  // 6. Fetch LinkedIn OAuth Configuration
+  const fetchOAuthConfig = useCallback(async () => {
+    const res = await safeFetchJson<{
+      success: boolean;
+      configured: boolean;
+      clientId?: string | null;
+      hasSecret?: boolean;
+      redirectUri?: string;
+    }>('/api/auth/linkedin/config');
+    if (res.ok && res.data) {
+      setOAuthConfigState({
+        configured: Boolean(res.data.configured),
+        clientId: res.data.clientId || null,
+        hasSecret: Boolean(res.data.hasSecret),
+        redirectUri: res.data.redirectUri || 'http://localhost:8088/api/auth/linkedin/callback',
+      });
+      if (res.data.clientId) {
+        setInputClientId(res.data.clientId);
+      }
+    }
+  }, []);
+
   // Initial load on mount
   useEffect(() => {
     fetchAccounts();
     fetchHealth();
-  }, [fetchAccounts, fetchHealth]);
+    fetchOAuthConfig();
+  }, [fetchAccounts, fetchHealth, fetchOAuthConfig]);
 
   // When selected account changes
   useEffect(() => {
@@ -294,10 +339,12 @@ export default function LinkedInHyperVApp() {
       fetchJobs();
     } else if (activeTab === 'accounts') {
       fetchAccounts();
+      fetchOAuthConfig();
     } else if (activeTab === 'health') {
       fetchHealth();
     }
-  }, [activeTab, fetchConversations, fetchMessages, fetchJobs, fetchAccounts, fetchHealth]);
+  }, [activeTab, fetchConversations, fetchMessages, fetchJobs, fetchAccounts, fetchHealth, fetchOAuthConfig]);
+
 
   // Controlled, Tab-Specific Background Polling Loop (every 5 seconds)
   useEffect(() => {
@@ -600,20 +647,108 @@ export default function LinkedInHyperVApp() {
     }
   };
 
+  // Handle Save OAuth App Configuration (Client ID / Client Secret)
+  const handleSaveOAuthConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputClientId.trim()) {
+      setUiAlert({ type: 'warning', message: 'Please enter a valid LinkedIn Client ID.' });
+      return;
+    }
+    setIsSavingOAuthConfig(true);
+    const res = await safeFetchJson<{
+      success: boolean;
+      configured: boolean;
+      message?: string;
+    }>('/api/auth/linkedin/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: inputClientId.trim(),
+        clientSecret: inputClientSecret.trim() || undefined,
+        redirectUri: oauthConfigState.redirectUri,
+      }),
+    });
+    setIsSavingOAuthConfig(false);
+
+    if (res.ok && res.data?.success) {
+      setUiAlert({
+        type: 'success',
+        message: 'LinkedIn OAuth app credentials saved! You can now click "Connect LinkedIn Account".',
+      });
+      setInputClientSecret('');
+      fetchOAuthConfig();
+    } else {
+      setUiAlert({
+        type: 'error',
+        message: res.error || 'Failed to save LinkedIn OAuth credentials.',
+      });
+    }
+  };
+
+  // Handle Direct Token Authorization (1-Click Instant Connect)
+  const handleAuthorizeDirectToken = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!directTokenInput.trim()) {
+      setUiAlert({ type: 'warning', message: 'Please enter a LinkedIn OAuth Bearer token.' });
+      return;
+    }
+    setIsAuthorizingToken(true);
+    const res = await safeFetchJson<{
+      success: boolean;
+      message?: string;
+      account?: Account;
+    }>('/api/auth/linkedin/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountId: selectedAccountId || undefined,
+        accessToken: directTokenInput.trim(),
+      }),
+    });
+    setIsAuthorizingToken(false);
+
+    if (res.ok && res.data?.success) {
+      setUiAlert({
+        type: 'success',
+        message: res.data.message || 'LinkedIn account connected successfully via OAuth token!',
+      });
+      setDirectTokenInput('');
+      setIsOAuthConfigOpen(false);
+      await fetchAccounts();
+      if (res.data.account?.id) {
+        setSelectedAccountId(res.data.account.id);
+      }
+    } else {
+      setUiAlert({
+        type: 'error',
+        message: res.error || 'Failed to authorize account with LinkedIn token.',
+      });
+    }
+  };
+
+  // Helper to copy redirect URI to clipboard
+  const handleCopyRedirectUri = () => {
+    const uri = oauthConfigState.redirectUri || 'http://localhost:8088/api/auth/linkedin/callback';
+    navigator.clipboard?.writeText(uri);
+    setCopiedRedirect(true);
+    setTimeout(() => setCopiedRedirect(false), 2500);
+  };
+
   // Handle Official LinkedIn OAuth Connect
   const handleConnectLinkedIn = async (accountId?: string) => {
     const accId = accountId || selectedAccountId;
     setIsConnecting(true);
     const url = `/api/auth/linkedin/connect${accId ? `?accountId=${encodeURIComponent(accId)}` : ''}`;
-    const res = await safeFetchJson<{ success: boolean; authUrl: string }>(url);
+    const res = await safeFetchJson<{ success: boolean; configured?: boolean; authUrl?: string }>(url);
     setIsConnecting(false);
 
     if (res.ok && res.data?.authUrl) {
       window.location.href = res.data.authUrl;
     } else {
+      setIsOAuthConfigOpen(true);
       setUiAlert({
-        type: 'error',
-        message: res.error || 'Failed to initiate LinkedIn OAuth connection.',
+        type: 'warning',
+        message: res.error || 'LinkedIn Developer App credentials (Client ID / Secret) are not configured. Please configure them below or connect via Direct OAuth Access Token.',
       });
     }
   };
@@ -622,7 +757,7 @@ export default function LinkedInHyperVApp() {
   const handleReconnectLinkedIn = async (accountId?: string) => {
     const accId = accountId || selectedAccountId;
     setIsConnecting(true);
-    const res = await safeFetchJson<{ success: boolean; authUrl?: string; message?: string }>('/api/auth/linkedin/reconnect', {
+    const res = await safeFetchJson<{ success: boolean; configured?: boolean; authUrl?: string; message?: string }>('/api/auth/linkedin/reconnect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accountId: accId }),
@@ -635,9 +770,14 @@ export default function LinkedInHyperVApp() {
       setUiAlert({ type: 'success', message: res.data?.message || 'Reconnection successful!' });
       fetchAccounts();
     } else {
-      setUiAlert({ type: 'error', message: res.error || 'Failed to reconnect LinkedIn account.' });
+      setIsOAuthConfigOpen(true);
+      setUiAlert({
+        type: 'warning',
+        message: res.error || 'LinkedIn credentials are not configured. Please enter your Client ID / Secret or authorize via Direct Token.',
+      });
     }
   };
+
 
   // Handle Disconnect LinkedIn Account
   const handleDisconnectLinkedIn = async (accountId?: string) => {
@@ -827,8 +967,23 @@ export default function LinkedInHyperVApp() {
       {uiAlert && (
         <div
           style={{
-            backgroundColor: uiAlert.type === 'success' ? '#064e3b' : uiAlert.type === 'error' ? '#7f1d1d' : '#1e3a8a',
-            border: `1px solid ${uiAlert.type === 'success' ? '#059669' : uiAlert.type === 'error' ? '#dc2626' : '#3b82f6'}`,
+            backgroundColor:
+              uiAlert.type === 'success'
+                ? '#064e3b'
+                : uiAlert.type === 'error'
+                ? '#7f1d1d'
+                : uiAlert.type === 'warning'
+                ? '#78350f'
+                : '#1e3a8a',
+            border: `1px solid ${
+              uiAlert.type === 'success'
+                ? '#059669'
+                : uiAlert.type === 'error'
+                ? '#dc2626'
+                : uiAlert.type === 'warning'
+                ? '#d97706'
+                : '#3b82f6'
+            }`,
             color: '#fff',
             padding: '10px 14px',
             borderRadius: 8,
@@ -839,9 +994,10 @@ export default function LinkedInHyperVApp() {
             fontSize: 13,
           }}
         >
-          <span>{uiAlert.type === 'success' ? '✓ ' : '⚠️ '} {uiAlert.message}</span>
+          <span>{uiAlert.type === 'success' ? '✓ ' : uiAlert.type === 'warning' ? '⚠️ ' : 'ℹ️ '} {uiAlert.message}</span>
           <button onClick={() => setUiAlert(null)} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 16 }}>×</button>
         </div>
+
       )}
 
       {/* Prominent Account Authorization Status Banner */}
@@ -1372,14 +1528,41 @@ export default function LinkedInHyperVApp() {
         <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 20 }}>
           {/* Managed LinkedIn Accounts List */}
           <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <h2 style={{ margin: 0, fontSize: 18, color: '#f1f5f9' }}>Managed LinkedIn Accounts</h2>
-              <button
-                onClick={fetchAccounts}
-                style={{ background: '#334155', color: '#38bdf8', border: '1px solid #0284c7', padding: '4px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
-              >
-                ↻ Refresh Status
-              </button>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <h2 style={{ margin: 0, fontSize: 18, color: '#f1f5f9' }}>Managed LinkedIn Accounts</h2>
+                <span
+                  style={{
+                    fontSize: 11,
+                    padding: '3px 8px',
+                    borderRadius: 12,
+                    fontWeight: 600,
+                    background: oauthConfigState.configured ? '#064e3b' : '#451a03',
+                    color: oauthConfigState.configured ? '#34d399' : '#fbbf24',
+                    border: `1px solid ${oauthConfigState.configured ? '#059669' : '#d97706'}`,
+                  }}
+                >
+                  {oauthConfigState.configured ? '● OAuth App Configured' : '○ OAuth App Pending Config'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOauthModalTab('app_credentials');
+                    setIsOAuthConfigOpen(true);
+                  }}
+                  style={{ background: '#334155', color: '#f8fafc', border: '1px solid #475569', padding: '5px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}
+                >
+                  ⚙️ OAuth App Settings
+                </button>
+                <button
+                  onClick={fetchAccounts}
+                  style={{ background: '#334155', color: '#38bdf8', border: '1px solid #0284c7', padding: '5px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
+                >
+                  ↻ Refresh Status
+                </button>
+              </div>
             </div>
 
             <div style={{ overflowX: 'auto' }}>
@@ -1515,7 +1698,7 @@ export default function LinkedInHyperVApp() {
                 Authenticate directly with LinkedIn using the official OAuth 2.0 protocol. No browser DevTools inspection or manual cookie copying is required.
               </p>
 
-              <div style={{ marginBottom: 18 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
                 <button
                   type="button"
                   onClick={() => handleConnectLinkedIn()}
@@ -1538,7 +1721,32 @@ export default function LinkedInHyperVApp() {
                   }}
                 >
                   <span style={{ fontSize: 16 }}>🔗</span>
-                  {isConnecting ? 'Initiating OAuth...' : 'Connect LinkedIn Account'}
+                  {isConnecting ? 'Initiating OAuth...' : 'Connect LinkedIn Account (OAuth 2.0)'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOauthModalTab('direct_token');
+                    setIsOAuthConfigOpen(true);
+                  }}
+                  style={{
+                    width: '100%',
+                    background: '#0f172a',
+                    color: '#38bdf8',
+                    border: '1px solid #0284c7',
+                    padding: '10px 14px',
+                    borderRadius: 8,
+                    fontWeight: 600,
+                    fontSize: 12,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
+                  }}
+                >
+                  <span>⚡</span> Paste Direct OAuth Bearer Token (1-Click)
                 </button>
               </div>
 
@@ -1592,6 +1800,214 @@ export default function LinkedInHyperVApp() {
           </div>
         </div>
       )}
+
+      {/* LINKEDIN OAUTH CONFIGURATION & DIRECT TOKEN MODAL */}
+      {isOAuthConfigOpen && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 110, backdropFilter: 'blur(3px)' }}>
+          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 12, padding: 24, width: 560, maxWidth: '94vw', maxHeight: '90vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ width: 28, height: 28, borderRadius: 6, background: '#0284c7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 14 }}>
+                  in
+                </div>
+                <h3 style={{ margin: 0, color: '#f8fafc', fontSize: 17, fontWeight: 700 }}>
+                  LinkedIn OAuth Integration Setup
+                </h3>
+              </div>
+              <button
+                onClick={() => setIsOAuthConfigOpen(false)}
+                style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 20, cursor: 'pointer' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal Tabs */}
+            <div style={{ display: 'flex', borderBottom: '1px solid #334155', marginBottom: 18 }}>
+              <button
+                type="button"
+                onClick={() => setOauthModalTab('app_credentials')}
+                style={{
+                  flex: 1,
+                  background: 'none',
+                  border: 'none',
+                  borderBottom: oauthModalTab === 'app_credentials' ? '2px solid #38bdf8' : '2px solid transparent',
+                  color: oauthModalTab === 'app_credentials' ? '#38bdf8' : '#94a3b8',
+                  padding: '10px 0',
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                ⚙️ OAuth App Credentials (Flow)
+              </button>
+              <button
+                type="button"
+                onClick={() => setOauthModalTab('direct_token')}
+                style={{
+                  flex: 1,
+                  background: 'none',
+                  border: 'none',
+                  borderBottom: oauthModalTab === 'direct_token' ? '2px solid #38bdf8' : '2px solid transparent',
+                  color: oauthModalTab === 'direct_token' ? '#38bdf8' : '#94a3b8',
+                  padding: '10px 0',
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                ⚡ Direct OAuth Token (Instant)
+              </button>
+            </div>
+
+            {/* Tab 1: App Credentials */}
+            {oauthModalTab === 'app_credentials' && (
+              <div>
+                <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 12, color: '#94a3b8', lineHeight: 1.5 }}>
+                  <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>How to configure your LinkedIn App:</div>
+                  1. Open your app on the <a href="https://www.linkedin.com/developers/apps" target="_blank" rel="noopener noreferrer" style={{ color: '#38bdf8', textDecoration: 'underline' }}>LinkedIn Developer Portal</a>.<br/>
+                  2. Under the <strong>Auth</strong> tab, copy the Authorized Redirect URL below and add it to <strong>OAuth 2.0 settings</strong>.<br/>
+                  3. Copy your <strong>Client ID</strong> and <strong>Primary Client Secret</strong> and paste them below.
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#cbd5e1', marginBottom: 4 }}>
+                    Authorized Redirect URL (Add this to LinkedIn Developer Portal):
+                  </label>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      type="text"
+                      readOnly
+                      value={oauthConfigState.redirectUri || 'http://localhost:8088/api/auth/linkedin/callback'}
+                      style={{ flex: 1, background: '#0f172a', border: '1px solid #334155', color: '#34d399', padding: '8px 10px', borderRadius: 6, fontSize: 12, fontFamily: 'monospace' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleCopyRedirectUri}
+                      style={{ background: '#334155', color: '#fff', border: '1px solid #475569', padding: '8px 14px', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
+                    >
+                      {copiedRedirect ? '✓ Copied!' : '📋 Copy'}
+                    </button>
+                  </div>
+                </div>
+
+                <form onSubmit={handleSaveOAuthConfig}>
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#cbd5e1', marginBottom: 4 }}>
+                      LinkedIn App Client ID:
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 78abc123def456"
+                      value={inputClientId}
+                      onChange={(e) => setInputClientId(e.target.value)}
+                      required
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontSize: 12 }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: 18 }}>
+                    <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#cbd5e1', marginBottom: 4 }}>
+                      LinkedIn App Client Secret:
+                    </label>
+                    <input
+                      type="password"
+                      placeholder={oauthConfigState.hasSecret ? '•••••••••••••••• (Encrypted in DB — leave blank to keep existing)' : 'Enter Primary Client Secret'}
+                      value={inputClientSecret}
+                      onChange={(e) => setInputClientSecret(e.target.value)}
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontSize: 12 }}
+                    />
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
+                      Stored server-side with AES-256 Fernet encryption. Never logged or exposed.
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8 }}>
+                    <div>
+                      {oauthConfigState.configured && (
+                        <span style={{ fontSize: 12, color: '#34d399', fontWeight: 600 }}>✓ App Configured Ready</span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 10 }}>
+                      <button
+                        type="button"
+                        onClick={() => setIsOAuthConfigOpen(false)}
+                        style={{ background: '#334155', color: '#cbd5e1', border: 'none', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}
+                      >
+                        Close
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isSavingOAuthConfig}
+                        style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '8px 18px', borderRadius: 6, fontWeight: 600, fontSize: 12, cursor: isSavingOAuthConfig ? 'wait' : 'pointer' }}
+                      >
+                        {isSavingOAuthConfig ? 'Saving...' : '💾 Save Credentials'}
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* Tab 2: Direct Token Input */}
+            {oauthModalTab === 'direct_token' && (
+              <div>
+                <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 12, color: '#94a3b8', lineHeight: 1.5 }}>
+                  <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>Instant Token Authorization:</div>
+                  Paste an OAuth 2.0 Bearer token generated from the LinkedIn Developer Portal (OAuth Token Generator tool) or Postman.
+                  Hyper-V will validate the token with LinkedIn, retrieve the profile, and activate the account immediately.
+                </div>
+
+                <form onSubmit={handleAuthorizeDirectToken}>
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#cbd5e1', marginBottom: 4 }}>
+                      OAuth Access Token:
+                    </label>
+                    <textarea
+                      rows={4}
+                      placeholder="Paste token starting with AQED... or Bearer token"
+                      value={directTokenInput}
+                      onChange={(e) => setDirectTokenInput(e.target.value)}
+                      required
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontSize: 12, fontFamily: 'monospace' }}
+                    />
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
+                      Tokens are encrypted with Fernet AES-256 before being stored in PostgreSQL.
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, paddingTop: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => setIsOAuthConfigOpen(false)}
+                      style={{ background: '#334155', color: '#cbd5e1', border: 'none', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}
+                    >
+                      Close
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isAuthorizingToken || !directTokenInput.trim()}
+                      style={{
+                        background: directTokenInput.trim() ? '#059669' : '#475569',
+                        color: '#fff',
+                        border: 'none',
+                        padding: '8px 18px',
+                        borderRadius: 6,
+                        fontWeight: 600,
+                        fontSize: 12,
+                        cursor: directTokenInput.trim() && !isAuthorizingToken ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      {isAuthorizingToken ? 'Validating with LinkedIn...' : '⚡ Authorize Account'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
 
       {/* ========================================================================= */}
       {/* TAB 5: SYSTEM HEALTH                                                      */}
