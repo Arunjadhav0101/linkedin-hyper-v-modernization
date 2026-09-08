@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 from .database import get_db_context
 from .models import LinkedInAccount, AutomationJob, Conversation, ChatMessage, DeadLetterQueue
 from .voyager import VoyagerClient, VoyagerApiError, MissingIntegrationError, ValidationError
-from .auth_service import validate_account
+from .oauth_service import validate_account_auth
+from .crypto import decrypt_token
 from .circuit_breaker import circuit_breaker
 
 logger = logging.getLogger("hyperv.worker")
@@ -82,15 +83,13 @@ class JobProcessor:
             logger.warning(f"Cleaned up {len(timed_out)} stuck jobs to TIMED_OUT status")
 
     def execute_job(self, db: Session, job: AutomationJob):
-        # 1. Centralized Pre-flight Authorization Check
-        auth_res = validate_account(db, job.accountId, force_live_check=False, voyager_client=self.voyager)
+        # 1. Centralized Pre-flight Authorization Check via Official OAuth 2.0 Integration
+        auth_res = validate_account_auth(db, job.accountId, operation=job.type)
         if not auth_res.valid:
             logger.warning(f"Pre-flight rejected for job {job.id}: {auth_res.reason}")
             job.status = "FAILED"
             job.retryCount = 0
-            job.errorMessage = (
-                f"External LinkedIn integration is not configured or the authorization session is invalid: {auth_res.reason}"
-            )
+            job.errorMessage = auth_res.reason or "LinkedIn account is not authorized for this operation."
             job.completedAt = datetime.utcnow()
             db.commit()
             return
@@ -99,7 +98,7 @@ class JobProcessor:
         if not account:
             job.status = "FAILED"
             job.retryCount = 0
-            job.errorMessage = f"LinkedInAccount '{job.accountId}' does not exist"
+            job.errorMessage = "LinkedIn account is not authorized for this operation."
             job.completedAt = datetime.utcnow()
             db.commit()
             return
@@ -347,9 +346,11 @@ class JobProcessor:
                 job.errorMessage = err_msg
                 job.completedAt = datetime.utcnow()
 
-                if "401" in err_msg or "Unauthorized" in err_msg or (isinstance(exc, VoyagerApiError) and exc.status_code in (401, 302)):
+                if "401" in err_msg or "unauthorized" in err_msg.lower() or (isinstance(exc, VoyagerApiError) and exc.status_code in (401, 302)):
+                    account.authStatus = "AUTHORIZATION_EXPIRED"
                     account.status = "SESSION_INVALID"
                 elif isinstance(exc, VoyagerApiError) and exc.status_code == 403:
+                    account.authStatus = "AUTHORIZATION_EXPIRED"
                     account.status = "SESSION_INVALID"
 
                 db.commit()

@@ -8,8 +8,12 @@ interface Account {
   email: string;
   name?: string;
   status: string;
-  authStatus?: 'NOT_CONFIGURED' | 'AUTHORIZED' | 'SESSION_INVALID' | 'DISABLED';
+  authType?: string;
+  authStatus?: 'NOT_CONNECTED' | 'CONNECTED' | 'AUTHORIZATION_EXPIRED' | 'ERROR';
   hasAuthorizedSession: boolean;
+  avatarUrl?: string | null;
+  tokenExpiresAt?: string | null;
+  tokenScope?: string | null;
   reason?: string;
   lastError?: string | null;
   pendingJobsCount?: number;
@@ -80,9 +84,13 @@ interface SystemHealth {
   };
   externalIntegration: {
     provider: string;
-    authorizedAccounts: number;
-    sessionInvalidAccounts: number;
-    notConfiguredAccounts: number;
+    connectedAccounts?: number;
+    expiredAccounts?: number;
+    errorAccounts?: number;
+    notConnectedAccounts?: number;
+    authorizedAccounts?: number;
+    sessionInvalidAccounts?: number;
+    notConfiguredAccounts?: number;
     overallStatus: string;
   };
   circuitBreaker: {
@@ -153,13 +161,10 @@ export default function LinkedInHyperVApp() {
   const [jobs, setJobs] = useState<AutomationJob[]>([]);
   const [health, setHealth] = useState<SystemHealth | null>(null);
 
-  // Account management form
+  // Account management & OAuth form
   const [newAccountEmail, setNewAccountEmail] = useState('');
   const [newAccountName, setNewAccountName] = useState('');
-  const [newLiAt, setNewLiAt] = useState('');
-  const [newJsessionId, setNewJsessionId] = useState('');
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verifyResult, setVerifyResult] = useState<{ verified: boolean; message: string } | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
 
   // UI status
   const [isSending, setIsSending] = useState(false);
@@ -184,6 +189,24 @@ export default function LinkedInHyperVApp() {
   useEffect(() => {
     scrollToBottom();
   }, [activeMessages]);
+
+  // Handle OAuth Redirect URL feedback (e.g. ?auth_success=1 or ?auth_error=...)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get('tab') as Tab;
+      if (tabParam && ['inbox', 'connections', 'jobs', 'accounts', 'health'].includes(tabParam)) {
+        setActiveTab(tabParam);
+      }
+      if (params.get('auth_success')) {
+        setUiAlert({ type: 'success', message: 'LinkedIn account connected successfully via official OAuth 2.0!' });
+        window.history.replaceState({}, document.title, window.location.pathname);
+      } else if (params.get('auth_error')) {
+        setUiAlert({ type: 'error', message: `LinkedIn OAuth Error: ${decodeURIComponent(params.get('auth_error') || '')}` });
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    }
+  }, []);
 
   // 1. Fetch Accounts
   const fetchAccounts = useCallback(async () => {
@@ -298,7 +321,7 @@ export default function LinkedInHyperVApp() {
 
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
   const activeConversation = conversations.find((c) => c.id === selectedConversationId);
-  const isAccountAuthorized = selectedAccount?.authStatus === 'AUTHORIZED';
+  const isAccountAuthorized = selectedAccount?.authStatus === 'CONNECTED';
 
   // Filtered conversation list based on search query
   const filteredConversations = conversations.filter((c) => {
@@ -319,7 +342,7 @@ export default function LinkedInHyperVApp() {
     if (!isAccountAuthorized) {
       setUiAlert({
         type: 'error',
-        message: 'LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.',
+        message: 'LinkedIn account is not authorized for this operation.',
       });
       return;
     }
@@ -409,7 +432,7 @@ export default function LinkedInHyperVApp() {
       );
       setUiAlert({
         type: 'error',
-        message: res.error || 'Failed to dispatch message',
+        message: res.error || 'LinkedIn account is not authorized for this operation.',
       });
       setIsSending(false);
     }
@@ -421,7 +444,10 @@ export default function LinkedInHyperVApp() {
     if (!selectedAccountId || !newChatRecipient.trim() || !newChatMessage.trim()) return;
 
     if (!isAccountAuthorized) {
-      alert('LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.');
+      setUiAlert({
+        type: 'error',
+        message: 'LinkedIn account is not authorized for this operation.',
+      });
       return;
     }
 
@@ -450,7 +476,10 @@ export default function LinkedInHyperVApp() {
       fetchJobs();
       setTimeout(() => fetchConversations(), 3000);
     } else {
-      alert(res.error || 'Failed to dispatch message');
+      setUiAlert({
+        type: 'error',
+        message: res.error || 'LinkedIn account is not authorized for this operation.',
+      });
     }
     setIsSending(false);
   };
@@ -460,10 +489,10 @@ export default function LinkedInHyperVApp() {
     if (!selectedAccountId) return;
 
     if (!isAccountAuthorized) {
-      setSyncFeedback('❌ LinkedIn account is not currently authorized for live operations.');
+      setSyncFeedback('❌ LinkedIn account is not authorized for this operation.');
       setUiAlert({
         type: 'error',
-        message: 'LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.',
+        message: 'LinkedIn account is not authorized for this operation.',
       });
       return;
     }
@@ -488,7 +517,11 @@ export default function LinkedInHyperVApp() {
         setTimeout(() => setSyncFeedback(null), 4000);
       }, 3500);
     } else {
-      setSyncFeedback(`❌ Sync failed: ${res.error || 'Could not queue sync job'}`);
+      setSyncFeedback(`❌ Sync failed: ${res.error || 'LinkedIn account is not authorized for this operation.'}`);
+      setUiAlert({
+        type: 'error',
+        message: res.error || 'LinkedIn account is not authorized for this operation.',
+      });
       setIsSyncing(false);
     }
   };
@@ -501,7 +534,7 @@ export default function LinkedInHyperVApp() {
     if (!isAccountAuthorized) {
       setUiAlert({
         type: 'error',
-        message: 'LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.',
+        message: 'LinkedIn account is not authorized for this operation.',
       });
       return;
     }
@@ -530,73 +563,99 @@ export default function LinkedInHyperVApp() {
     } else {
       setUiAlert({
         type: 'error',
-        message: res.error || 'Failed to dispatch connection request',
+        message: res.error || 'LinkedIn account is not authorized for this operation.',
       });
     }
   };
 
-  // Handle Save Account
-  const handleSaveAccount = async (e: React.FormEvent) => {
+  // Handle Create Account Profile
+  const handleCreateAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newAccountEmail.trim()) return;
 
-    const trimmedLiAt = newLiAt.trim().replace(/^['"]+|['"]+$/g, '');
-    const trimmedJsessionId = newJsessionId.trim().replace(/^['"]+|['"]+$/g, '');
-
-    const res = await safeFetchJson<{ success: boolean }>('/api/accounts', {
+    const res = await safeFetchJson<{ success: boolean; data?: Account; authUrl?: string }>('/api/accounts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         email: newAccountEmail.trim(),
         name: newAccountName.trim() || undefined,
-        cookies: {
-          li_at: trimmedLiAt || undefined,
-          JSESSIONID: trimmedJsessionId || undefined,
-        },
       }),
     });
 
-    if (res.ok && res.data?.success) {
+    if (res.ok && res.data?.data) {
+      const created = res.data.data;
       setNewAccountEmail('');
       setNewAccountName('');
-      setNewLiAt('');
-      setNewJsessionId('');
-      fetchAccounts();
-      alert('Account credentials saved successfully!');
+      await fetchAccounts();
+      setSelectedAccountId(created.id);
+      setUiAlert({
+        type: 'success',
+        message: `Account "${created.email}" registered. Click "Connect LinkedIn Account" to authorize via official OAuth 2.0.`,
+      });
     } else {
-      alert(res.error || 'Failed to save account');
+      setUiAlert({
+        type: 'error',
+        message: res.error || 'Failed to create account profile',
+      });
     }
   };
 
-  // Handle Live Session Verification
-  const handleVerifySession = async (accountId?: string) => {
-    setIsVerifying(true);
-    setVerifyResult(null);
+  // Handle Official LinkedIn OAuth Connect
+  const handleConnectLinkedIn = async (accountId?: string) => {
+    const accId = accountId || selectedAccountId;
+    setIsConnecting(true);
+    const url = `/api/auth/linkedin/connect${accId ? `?accountId=${encodeURIComponent(accId)}` : ''}`;
+    const res = await safeFetchJson<{ success: boolean; authUrl: string }>(url);
+    setIsConnecting(false);
 
-    const res = await safeFetchJson<{ success: boolean; data?: any; error?: any }>('/api/accounts/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        accountId: accountId || selectedAccountId,
-        li_at: newLiAt.trim() || undefined,
-        JSESSIONID: newJsessionId.trim() || undefined,
-      }),
-    });
-
-    if (res.ok && res.data?.success) {
-      setVerifyResult({
-        verified: true,
-        message: `✓ Valid Session! Logged in as: ${res.data.data?.publicIdentifier || 'LinkedIn Member'} (200 OK)`,
-      });
+    if (res.ok && res.data?.authUrl) {
+      window.location.href = res.data.authUrl;
     } else {
-      const errDetail = res.data?.error?.message || res.error || 'Verification failed';
-      setVerifyResult({
-        verified: false,
-        message: `❌ ${errDetail}`,
+      setUiAlert({
+        type: 'error',
+        message: res.error || 'Failed to initiate LinkedIn OAuth connection.',
       });
     }
-    setIsVerifying(false);
-    fetchAccounts();
+  };
+
+  // Handle Official LinkedIn OAuth Reconnect
+  const handleReconnectLinkedIn = async (accountId?: string) => {
+    const accId = accountId || selectedAccountId;
+    setIsConnecting(true);
+    const res = await safeFetchJson<{ success: boolean; authUrl?: string; message?: string }>('/api/auth/linkedin/reconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId: accId }),
+    });
+    setIsConnecting(false);
+
+    if (res.ok && res.data?.authUrl) {
+      window.location.href = res.data.authUrl;
+    } else if (res.ok) {
+      setUiAlert({ type: 'success', message: res.data?.message || 'Reconnection successful!' });
+      fetchAccounts();
+    } else {
+      setUiAlert({ type: 'error', message: res.error || 'Failed to reconnect LinkedIn account.' });
+    }
+  };
+
+  // Handle Disconnect LinkedIn Account
+  const handleDisconnectLinkedIn = async (accountId?: string) => {
+    const accId = accountId || selectedAccountId;
+    if (!confirm('Are you sure you want to disconnect this LinkedIn account?')) return;
+
+    const res = await safeFetchJson<{ success: boolean; message?: string }>('/api/auth/linkedin/disconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId: accId }),
+    });
+
+    if (res.ok) {
+      setUiAlert({ type: 'info', message: 'LinkedIn account authorization disconnected.' });
+      fetchAccounts();
+    } else {
+      setUiAlert({ type: 'error', message: res.error || 'Failed to disconnect account.' });
+    }
   };
 
   // Handle Maintenance (Retry, Clear DLQ, Clear Jobs)
@@ -635,12 +694,31 @@ export default function LinkedInHyperVApp() {
   // Badge renderers
   const renderAuthBadge = (authStatus?: string) => {
     switch (authStatus) {
-      case 'AUTHORIZED':
-        return <span style={{ background: '#065f46', color: '#34d399', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700 }}>AUTHORIZED</span>;
-      case 'SESSION_INVALID':
-        return <span style={{ background: '#7f1d1d', color: '#fca5a5', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700 }}>SESSION_INVALID</span>;
+      case 'CONNECTED':
+        return (
+          <span style={{ background: '#065f46', color: '#34d399', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            ● CONNECTED
+          </span>
+        );
+      case 'AUTHORIZATION_EXPIRED':
+        return (
+          <span style={{ background: '#78350f', color: '#fde047', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            ⚠ AUTHORIZATION_EXPIRED
+          </span>
+        );
+      case 'ERROR':
+        return (
+          <span style={{ background: '#7f1d1d', color: '#fca5a5', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            ✕ ERROR
+          </span>
+        );
+      case 'NOT_CONNECTED':
       default:
-        return <span style={{ background: '#713f12', color: '#fde047', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700 }}>NOT_CONFIGURED</span>;
+        return (
+          <span style={{ background: '#334155', color: '#94a3b8', padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            ○ NOT_CONNECTED
+          </span>
+        );
     }
   };
 
@@ -719,7 +797,7 @@ export default function LinkedInHyperVApp() {
             inbox: '💬 Hyper-V Inbox (Primary)',
             connections: '🤝 Connection Requests',
             jobs: '⚡ Automation Jobs',
-            accounts: '🔑 Accounts & Cookies',
+            accounts: '🔐 Accounts',
             health: '🛡 System Health',
           };
           const isActive = activeTab === tab;
@@ -785,20 +863,20 @@ export default function LinkedInHyperVApp() {
             <span style={{ fontSize: 20 }}>⚠️</span>
             <div>
               <div style={{ fontWeight: 700, color: '#fca5a5', fontSize: 13 }}>
-                LinkedIn Account Authorization Required ({selectedAccount?.authStatus || 'NOT_CONFIGURED'})
+                LinkedIn Account Authorization Required ({selectedAccount?.authStatus || 'NOT_CONNECTED'})
               </div>
               <div style={{ color: '#fecaca', fontSize: 12, marginTop: 2 }}>
-                LinkedIn account is not currently authorized for live operations. Please configure or re-authorize the account in Accounts & Cookies.
+                LinkedIn account is not authorized for this operation.
               </div>
             </div>
           </div>
           <button
             onClick={() => setActiveTab('accounts')}
             style={{
-              background: '#b91c1c',
+              background: '#0284c7',
               color: '#fff',
               border: 'none',
-              padding: '6px 14px',
+              padding: '8px 16px',
               borderRadius: 6,
               fontSize: 12,
               fontWeight: 700,
@@ -806,7 +884,7 @@ export default function LinkedInHyperVApp() {
               whiteSpace: 'nowrap',
             }}
           >
-            Configure Cookies &rarr;
+            Connect LinkedIn Account &rarr;
           </button>
         </div>
       )}
@@ -1037,8 +1115,8 @@ export default function LinkedInHyperVApp() {
                   }}
                 >
                   {!isAccountAuthorized ? (
-                    <div style={{ color: '#fca5a5', fontSize: 12, textAlign: 'center', padding: '8px' }}>
-                      Sending is disabled: LinkedIn account is not authorized. Configure valid cookies in Accounts tab.
+                    <div style={{ color: '#fca5a5', fontSize: 12, textAlign: 'center', padding: '8px', background: '#450a0a', borderRadius: 6 }}>
+                      Sending is disabled: LinkedIn account is not authorized for this operation.
                     </div>
                   ) : (
                     <div style={{ display: 'flex', gap: 10 }}>
@@ -1200,7 +1278,7 @@ export default function LinkedInHyperVApp() {
                 cursor: isAccountAuthorized ? 'pointer' : 'not-allowed',
               }}
             >
-              {isAccountAuthorized ? 'Send Connection Invitation' : 'Account Not Authorized — Configure in Accounts Tab'}
+              {isAccountAuthorized ? 'Send Connection Invitation' : 'LinkedIn account is not authorized for this operation.'}
             </button>
           </form>
         </div>
@@ -1288,167 +1366,229 @@ export default function LinkedInHyperVApp() {
       )}
 
       {/* ========================================================================= */}
-      {/* TAB 4: ACCOUNTS & COOKIES                                                 */}
+      {/* TAB 4: ACCOUNTS (OFFICIAL OAUTH 2.0 INTEGRATION)                          */}
       {/* ========================================================================= */}
       {activeTab === 'accounts' && (
         <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 20 }}>
-          {/* Accounts List */}
+          {/* Managed LinkedIn Accounts List */}
           <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20 }}>
-            <h2 style={{ marginTop: 0, fontSize: 18 }}>Managed LinkedIn Accounts</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h2 style={{ margin: 0, fontSize: 18, color: '#f1f5f9' }}>Managed LinkedIn Accounts</h2>
+              <button
+                onClick={fetchAccounts}
+                style={{ background: '#334155', color: '#38bdf8', border: '1px solid #0284c7', padding: '4px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
+              >
+                ↻ Refresh Status
+              </button>
+            </div>
+
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
                   <tr style={{ color: '#94a3b8', borderBottom: '1px solid #334155', textAlign: 'left' }}>
-                    <th style={{ padding: '8px 0' }}>Email / Name</th>
+                    <th style={{ padding: '8px 0' }}>Account</th>
                     <th>Status</th>
-                    <th>Pending</th>
-                    <th>Action</th>
+                    <th>Security / Scope</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {accounts.map((a) => (
                     <tr key={a.id} style={{ borderBottom: '1px solid #334155' }}>
-                      <td style={{ padding: '10px 0' }}>
-                        <div style={{ fontWeight: 600 }}>{a.name || a.email}</div>
-                        <div style={{ fontSize: 11, color: '#94a3b8' }}>{a.email}</div>
-                        {a.lastError && <div style={{ color: '#f87171', fontSize: 11 }}>Error: {a.lastError}</div>}
+                      <td style={{ padding: '12px 0' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          {a.avatarUrl ? (
+                            <img
+                              src={a.avatarUrl}
+                              alt={a.name || a.email}
+                              style={{ width: 32, height: 32, borderRadius: 16, objectFit: 'cover' }}
+                            />
+                          ) : (
+                            <div style={{ width: 32, height: 32, borderRadius: 16, background: '#0284c7', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 12 }}>
+                              {(a.name || a.email).charAt(0).toUpperCase()}
+                            </div>
+                          )}
+                          <div>
+                            <div style={{ fontWeight: 600, color: '#f8fafc' }}>{a.name || a.email}</div>
+                            <div style={{ fontSize: 11, color: '#94a3b8' }}>{a.email}</div>
+                            {a.tokenExpiresAt && (
+                              <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
+                                Expires: {formatDate(a.tokenExpiresAt)}
+                              </div>
+                            )}
+                          </div>
+                        </div>
                       </td>
-                      <td>{renderAuthBadge(a.authStatus)}</td>
-                      <td>{a.pendingJobsCount || 0}</td>
-                      <td style={{ display: 'flex', gap: 6, padding: '10px 0' }}>
-                        <button
-                          onClick={() => {
-                            setSelectedAccountId(a.id);
-                            setNewAccountEmail(a.email);
-                            setNewAccountName(a.name || '');
-                            setVerifyResult(null);
-                          }}
-                          style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
-                        >
-                          Update Cookies
-                        </button>
-                        <button
-                          onClick={() => handleVerifySession(a.id)}
-                          disabled={isVerifying}
-                          style={{ background: '#334155', color: '#38bdf8', border: 'none', padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}
-                        >
-                          Verify Live
-                        </button>
+                      <td>
+                        <div>{renderAuthBadge(a.authStatus)}</div>
+                        {a.authType && (
+                          <span style={{ fontSize: 10, color: '#94a3b8', display: 'block', marginTop: 4 }}>
+                            {a.authType.toUpperCase()}
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        <div style={{ fontSize: 11, color: '#cbd5e1' }}>
+                          <span style={{ color: '#38bdf8' }}>AES-256</span> Encrypted
+                        </div>
+                        <div style={{ fontSize: 10, color: '#64748b', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.tokenScope || 'openid profile email'}>
+                          {a.tokenScope || 'openid profile email'}
+                        </div>
+                      </td>
+                      <td style={{ padding: '12px 0' }}>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {a.authStatus === 'CONNECTED' ? (
+                            <>
+                              <button
+                                onClick={() => handleReconnectLinkedIn(a.id)}
+                                disabled={isConnecting}
+                                style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
+                                title="Re-authorize LinkedIn OAuth tokens"
+                              >
+                                ↻ Reconnect
+                              </button>
+                              <button
+                                onClick={() => handleDisconnectLinkedIn(a.id)}
+                                style={{ background: '#334155', color: '#fca5a5', border: '1px solid #7f1d1d', padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}
+                                title="Disconnect account and revoke tokens"
+                              >
+                                Disconnect
+                              </button>
+                            </>
+                          ) : a.authStatus === 'AUTHORIZATION_EXPIRED' ? (
+                            <>
+                              <button
+                                onClick={() => handleReconnectLinkedIn(a.id)}
+                                disabled={isConnecting}
+                                style={{ background: '#d97706', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
+                                title="Renew expired authorization session"
+                              >
+                                ⚠️ Reconnect
+                              </button>
+                              <button
+                                onClick={() => handleDisconnectLinkedIn(a.id)}
+                                style={{ background: '#334155', color: '#fca5a5', border: '1px solid #7f1d1d', padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}
+                              >
+                                Disconnect
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => handleConnectLinkedIn(a.id)}
+                              disabled={isConnecting}
+                              style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
+                            >
+                              🔗 Connect LinkedIn Account
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
+                  {accounts.length === 0 && (
+                    <tr>
+                      <td colSpan={4} style={{ padding: 20, textAlign: 'center', color: '#64748b' }}>
+                        No LinkedIn accounts registered yet. Register an account below to connect.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
           </div>
 
-          {/* Account Credential Configuration */}
-          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20 }}>
-            <h2 style={{ marginTop: 0, fontSize: 18, color: '#38bdf8' }}>Configure Authorized Session</h2>
-            <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 12, marginBottom: 14, fontSize: 12, color: '#cbd5e1', lineHeight: 1.5 }}>
-              <strong style={{ color: '#38bdf8' }}>Extracting cookies from LinkedIn:</strong><br />
-              1. Open <strong>linkedin.com</strong> in your browser (keep this tab open, do not click Sign Out).<br />
-              2. Press <code>F12</code> &rarr; <strong>Application</strong> &rarr; <strong>Cookies</strong> &rarr; <code>https://www.linkedin.com</code>.<br />
-              3. Copy <code>li_at</code> (~150 chars, begins with AQED...) and <code>JSESSIONID</code>.<br />
-              <em style={{ color: '#94a3b8' }}>Tip: You can also paste your full Cookie header into the field below and it will auto-extract!</em>
-            </div>
-
-            <form onSubmit={handleSaveAccount}>
-              <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>Account Email:</label>
-                <input
-                  type="email"
-                  placeholder="arunj5687@gmail.com"
-                  value={newAccountEmail}
-                  onChange={(e) => setNewAccountEmail(e.target.value)}
-                  required
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box' }}
-                />
-              </div>
-
-              <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>Account Name (Optional):</label>
-                <input
-                  type="text"
-                  placeholder="Arun Jadhav"
-                  value={newAccountName}
-                  onChange={(e) => setNewAccountName(e.target.value)}
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box' }}
-                />
-              </div>
-
-              <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>`li_at` Session Token (or paste entire Cookie header):</label>
-                <textarea
-                  rows={3}
-                  placeholder="AQEDAVB... or paste raw Cookie: header"
-                  value={newLiAt}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val.includes(';') && val.includes('=')) {
-                      // Auto-extract li_at and JSESSIONID from raw cookie string
-                      for (const part of val.split(';')) {
-                        const eq = part.indexOf('=');
-                        if (eq !== -1) {
-                          const k = part.slice(0, eq).trim();
-                          const v = part.slice(eq + 1).trim().replace(/^['"]+|['"]+$/g, '');
-                          if (k === 'li_at') setNewLiAt(v);
-                          if (k === 'JSESSIONID') setNewJsessionId(v);
-                        }
-                      }
-                    } else {
-                      setNewLiAt(val);
-                    }
-                  }}
-                  required
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontFamily: 'monospace', fontSize: 11 }}
-                />
-              </div>
-
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ display: 'block', fontSize: 12, color: '#cbd5e1', marginBottom: 4 }}>`JSESSIONID` Token:</label>
-                <input
-                  type="text"
-                  placeholder='ajax:123456789...'
-                  value={newJsessionId}
-                  onChange={(e) => setNewJsessionId(e.target.value)}
-                  required
-                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontFamily: 'monospace', fontSize: 11 }}
-                />
-              </div>
-
-              {verifyResult && (
-                <div
-                  style={{
-                    marginBottom: 12,
-                    padding: '8px 12px',
-                    borderRadius: 6,
-                    fontSize: 12,
-                    background: verifyResult.verified ? '#064e3b' : '#7f1d1d',
-                    color: '#fff',
-                  }}
-                >
-                  {verifyResult.message}
+          {/* Connect & Security Control Panel */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {/* Primary OAuth Action Card */}
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 10, padding: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                <div style={{ width: 32, height: 32, borderRadius: 6, background: '#0284c7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 16 }}>
+                  in
                 </div>
-              )}
+                <div>
+                  <h2 style={{ margin: 0, fontSize: 16, color: '#38bdf8' }}>Official LinkedIn Integration</h2>
+                  <span style={{ fontSize: 11, color: '#94a3b8' }}>OAuth 2.0 Authorization Flow</span>
+                </div>
+              </div>
 
-              <div style={{ display: 'flex', gap: 10 }}>
-                <button
-                  type="submit"
-                  style={{ flex: 1, background: '#0284c7', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 6, fontWeight: 700, cursor: 'pointer' }}
-                >
-                  Save Account
-                </button>
+              <p style={{ fontSize: 12, color: '#cbd5e1', lineHeight: 1.5, marginBottom: 16 }}>
+                Authenticate directly with LinkedIn using the official OAuth 2.0 protocol. No browser DevTools inspection or manual cookie copying is required.
+              </p>
+
+              <div style={{ marginBottom: 18 }}>
                 <button
                   type="button"
-                  onClick={() => handleVerifySession(selectedAccountId)}
-                  disabled={isVerifying}
-                  style={{ background: '#334155', color: '#38bdf8', border: '1px solid #0284c7', padding: '10px 14px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
+                  onClick={() => handleConnectLinkedIn()}
+                  disabled={isConnecting}
+                  style={{
+                    width: '100%',
+                    background: '#0284c7',
+                    color: '#fff',
+                    border: 'none',
+                    padding: '12px 16px',
+                    borderRadius: 8,
+                    fontWeight: 700,
+                    fontSize: 14,
+                    cursor: isConnecting ? 'wait' : 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
+                    boxShadow: '0 2px 8px rgba(2, 132, 199, 0.4)',
+                  }}
                 >
-                  {isVerifying ? 'Testing...' : '🔍 Test Live'}
+                  <span style={{ fontSize: 16 }}>🔗</span>
+                  {isConnecting ? 'Initiating OAuth...' : 'Connect LinkedIn Account'}
                 </button>
               </div>
-            </form>
+
+              {/* Form to pre-register a specific account email */}
+              <div style={{ borderTop: '1px solid #334155', paddingTop: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#94a3b8', marginBottom: 8 }}>
+                  Or register account profile:
+                </div>
+                <form onSubmit={handleCreateAccount}>
+                  <div style={{ marginBottom: 10 }}>
+                    <input
+                      type="email"
+                      placeholder="Account Email (e.g. user@example.com)"
+                      value={newAccountEmail}
+                      onChange={(e) => setNewAccountEmail(e.target.value)}
+                      required
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontSize: 12 }}
+                    />
+                  </div>
+                  <div style={{ marginBottom: 10 }}>
+                    <input
+                      type="text"
+                      placeholder="Account Name (Optional)"
+                      value={newAccountName}
+                      onChange={(e) => setNewAccountName(e.target.value)}
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: 8, borderRadius: 6, boxSizing: 'border-box', fontSize: 12 }}
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    style={{ width: '100%', background: '#334155', color: '#38bdf8', border: '1px solid #0284c7', padding: '8px', borderRadius: 6, fontWeight: 600, fontSize: 12, cursor: 'pointer' }}
+                  >
+                    + Register Profile
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            {/* Architecture & Capabilities Card */}
+            <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 10, padding: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#38bdf8', marginBottom: 8 }}>
+                Security & Scope Architecture
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: '#cbd5e1', lineHeight: 1.6 }}>
+                <li><strong>Zero Cookie Extraction:</strong> No browser DevTools or raw cookies are used.</li>
+                <li><strong>Server-Side Encryption:</strong> Tokens are encrypted at rest with Fernet AES-256 and never logged or sent to client bundles.</li>
+                <li><strong>Official Scopes:</strong> Standard developer scopes include <code>openid</code>, <code>profile</code>, <code>email</code>, and <code>w_member_social</code>.</li>
+                <li><strong>Zero Fake Operations:</strong> 1-on-1 member DMs and invitations require LinkedIn Enterprise Partner permissions. If an account lacks authorization, the app strictly rejects operations without faking success.</li>
+              </ul>
+            </div>
           </div>
         </div>
       )}
@@ -1496,7 +1636,7 @@ export default function LinkedInHyperVApp() {
               <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
                 <div style={{ color: '#94a3b8', fontSize: 12 }}>Integration Provider</div>
                 <div style={{ fontSize: 16, fontWeight: 700, color: '#f8fafc', marginTop: 4 }}>
-                  {health?.externalIntegration?.provider || 'LinkedIn Voyager API'}
+                  {health?.externalIntegration?.provider || 'Official LinkedIn OAuth 2.0 & REST API'}
                 </div>
               </div>
               <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
@@ -1506,15 +1646,15 @@ export default function LinkedInHyperVApp() {
                 </div>
               </div>
               <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-                <div style={{ color: '#94a3b8', fontSize: 12 }}>Authorized Accounts</div>
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Connected Accounts</div>
                 <div style={{ fontSize: 18, fontWeight: 700, color: '#34d399', marginTop: 4 }}>
-                  {health?.externalIntegration?.authorizedAccounts ?? 0}
+                  {health?.externalIntegration?.connectedAccounts ?? health?.externalIntegration?.authorizedAccounts ?? 0}
                 </div>
               </div>
               <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: 16 }}>
-                <div style={{ color: '#94a3b8', fontSize: 12 }}>Invalid / Expired Sessions</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: (health?.externalIntegration?.sessionInvalidAccounts ?? 0) > 0 ? '#f87171' : '#94a3b8', marginTop: 4 }}>
-                  {health?.externalIntegration?.sessionInvalidAccounts ?? 0}
+                <div style={{ color: '#94a3b8', fontSize: 12 }}>Expired / Action Needed</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: (health?.externalIntegration?.expiredAccounts ?? health?.externalIntegration?.sessionInvalidAccounts ?? 0) > 0 ? '#f87171' : '#94a3b8', marginTop: 4 }}>
+                  {health?.externalIntegration?.expiredAccounts ?? health?.externalIntegration?.sessionInvalidAccounts ?? 0}
                 </div>
               </div>
             </div>

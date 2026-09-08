@@ -7,72 +7,161 @@ import httpx
 try:
     from backend.app.models import LinkedInAccount, AutomationJob, Conversation, ChatMessage, DeadLetterQueue
     from backend.app.voyager import VoyagerClient, VoyagerApiError, MissingIntegrationError, ValidationError
-    from backend.app.auth_service import validate_account, AccountValidationResult
+    from backend.app.crypto import encrypt_token, decrypt_token, redact_token
+    from backend.app.oauth_service import (
+        LinkedInOAuthService,
+        oauth_service,
+        validate_account_auth,
+        AccountAuthResult,
+    )
     from backend.app.circuit_breaker import CircuitBreaker, circuit_breaker
     from backend.app.worker import JobProcessor
     from backend.app.main import app
 except ImportError:
     from app.models import LinkedInAccount, AutomationJob, Conversation, ChatMessage, DeadLetterQueue
     from app.voyager import VoyagerClient, VoyagerApiError, MissingIntegrationError, ValidationError
-    from app.auth_service import validate_account, AccountValidationResult
+    from app.crypto import encrypt_token, decrypt_token, redact_token
+    from app.oauth_service import (
+        LinkedInOAuthService,
+        oauth_service,
+        validate_account_auth,
+        AccountAuthResult,
+    )
     from app.circuit_breaker import CircuitBreaker, circuit_breaker
     from app.worker import JobProcessor
     from app.main import app
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 
 # ============================================================================
-# 1. test_account_validation_not_configured
+# 1. Encryption & Decryption Engine (crypto.py)
 # ============================================================================
-def test_account_validation_not_configured():
-    db = MagicMock()
-    account = LinkedInAccount(id="acc_no_cookie", email="nocookie@test.com", status="ACTIVE", cookies={})
-    res = validate_account(db, account)
-    assert res.valid is False
-    assert res.status == "NOT_CONFIGURED"
-    assert "Missing required 'li_at'" in (res.reason or "")
+def test_crypto_encrypt_decrypt_roundtrip():
+    raw_secret = "AQED_TEST_OFFICIAL_OAUTH_TOKEN_9876543210_SECRET"
+    ciphertext = encrypt_token(raw_secret)
+    assert ciphertext is not None
+    assert ciphertext != raw_secret
+    assert not ciphertext.startswith("AQED")
+
+    decrypted = decrypt_token(ciphertext)
+    assert decrypted == raw_secret
+
+
+def test_crypto_corrupt_ciphertext_fails_gracefully():
+    corrupt = "gAAAAABinvalid_corrupt_token_payload_xyz"
+    assert decrypt_token(corrupt) is None
+    assert decrypt_token("") is None
+    assert decrypt_token(None) is None
+
+
+def test_crypto_redact_token():
+    token = "AQEDAVBxY_4BEzK3sLdM7Q_1234567890abcdef"
+    redacted = redact_token(token)
+    assert redacted.startswith("AQED")
+    assert redacted.endswith("cdef")
+    assert "..." in redacted
+    assert redact_token("") == "[NOT_CONFIGURED]"
+    assert redact_token(None) == "[NOT_CONFIGURED]"
 
 
 # ============================================================================
-# 2. test_account_validation_session_invalid
+# 2. LinkedIn OAuth 2.0 URL Generation
 # ============================================================================
-def test_account_validation_session_invalid():
-    db = MagicMock()
-    # Short token
-    acc_short = LinkedInAccount(id="acc_short", email="short@test.com", status="ACTIVE", cookies={"li_at": "Short123"})
-    res_short = validate_account(db, acc_short)
-    assert res_short.valid is False
-    assert res_short.status == "SESSION_INVALID"
-    assert "Invalid 'li_at' cookie format" in (res_short.reason or "")
-
-    # Pre-existing SESSION_INVALID status
-    acc_invalid = LinkedInAccount(
-        id="acc_inv",
-        email="invalid@test.com",
-        status="SESSION_INVALID",
-        cookies={"li_at": "AQED_TEST_VALID_LENGTH_TOKEN_1234567890123456789012345678901234567890"},
-    )
-    res_inv = validate_account(db, acc_invalid)
-    assert res_inv.valid is False
-    assert res_inv.status == "SESSION_INVALID"
-    assert "previously invalidated" in (res_inv.reason or "")
+def test_oauth_authorization_url_generation():
+    auth_url, state = oauth_service.build_authorization_url("acc_123")
+    assert "https://www.linkedin.com/oauth/v2/authorization" in auth_url
+    assert "response_type=code" in auth_url
+    assert f"client_id={oauth_service.client_id}" in auth_url
+    assert "scope=" in auth_url
+    assert "state=" in auth_url
+    assert len(state) >= 16
 
 
 # ============================================================================
-# 3. test_account_validation_authorized
+# 3. Canonical Account States & validate_account_auth
 # ============================================================================
-def test_account_validation_authorized():
+def test_validate_account_auth_not_connected():
     db = MagicMock()
     account = LinkedInAccount(
-        id="acc_auth",
-        email="auth@test.com",
-        status="ACTIVE",
-        cookies={"li_at": "AQED_TEST_VALID_LENGTH_TOKEN_1234567890123456789012345678901234567890"},
+        id="acc_no_token",
+        email="notconnected@test.com",
+        authStatus="NOT_CONNECTED",
+        encryptedAccessToken=None,
     )
-    res = validate_account(db, account)
+    res = validate_account_auth(db, account)
+    assert res.valid is False
+    assert res.auth_status == "NOT_CONNECTED"
+    assert "LinkedIn account is not authorized for this operation." in res.reason
+
+
+def test_validate_account_auth_authorization_expired():
+    db = MagicMock()
+    account = LinkedInAccount(
+        id="acc_expired",
+        email="expired@test.com",
+        authStatus="AUTHORIZATION_EXPIRED",
+        encryptedAccessToken=encrypt_token("old_token"),
+        tokenExpiresAt=datetime.utcnow() - timedelta(days=1),
+    )
+    with patch.object(oauth_service, "refresh_access_token", return_value=False):
+        res = validate_account_auth(db, account)
+        assert res.valid is False
+        assert res.auth_status == "AUTHORIZATION_EXPIRED"
+        assert "LinkedIn account is not authorized for this operation." in res.reason
+
+
+def test_validate_account_auth_error_status():
+    db = MagicMock()
+    account = LinkedInAccount(
+        id="acc_err",
+        email="error@test.com",
+        authStatus="ERROR",
+        encryptedAccessToken=encrypt_token("some_token"),
+    )
+    res = validate_account_auth(db, account)
+    assert res.valid is False
+    assert res.auth_status == "ERROR"
+    assert "LinkedIn account is not authorized for this operation." in res.reason
+
+
+def test_validate_account_auth_scope_restriction_no_fake_success():
+    """
+    Standard consumer scopes do not include enterprise partner messaging.
+    System reports limitation transparently instead of simulating fake action.
+    """
+    db = MagicMock()
+    raw_token = "valid_oauth_access_token_12345"
+    account = LinkedInAccount(
+        id="acc_connected_consumer",
+        email="consumer@test.com",
+        authStatus="CONNECTED",
+        encryptedAccessToken=encrypt_token(raw_token),
+        tokenExpiresAt=datetime.utcnow() + timedelta(days=30),
+        tokenScope="openid profile email w_member_social",
+    )
+    res = validate_account_auth(db, account, operation="SEND_MESSAGE")
+    assert res.valid is False
+    assert "LinkedIn account is not authorized for this operation." in res.reason
+    assert "Enterprise Partner" in res.reason
+
+
+def test_validate_account_auth_connected_with_partner_scope():
+    db = MagicMock()
+    raw_token = "valid_oauth_access_token_partner"
+    account = LinkedInAccount(
+        id="acc_connected_partner",
+        email="partner@test.com",
+        authStatus="CONNECTED",
+        encryptedAccessToken=encrypt_token(raw_token),
+        tokenExpiresAt=datetime.utcnow() + timedelta(days=30),
+        tokenScope="openid profile email r_messages w_messages",
+    )
+    res = validate_account_auth(db, account, operation="SEND_MESSAGE")
     assert res.valid is True
-    assert res.status == "AUTHORIZED"
+    assert res.auth_status == "CONNECTED"
+    assert res.decrypted_token == raw_token
 
 
 # ============================================================================
@@ -118,8 +207,13 @@ def test_worker_preflight_blocks_invalid_account_with_zero_retries():
     processor = JobProcessor()
     db = MagicMock()
 
-    # Account has no cookie (NOT_CONFIGURED)
-    account = LinkedInAccount(id="acc_unauth", email="unauth@test.com", status="ACTIVE", cookies={})
+    # Account has no OAuth token (NOT_CONNECTED)
+    account = LinkedInAccount(
+        id="acc_unauth",
+        email="unauth@test.com",
+        authStatus="NOT_CONNECTED",
+        encryptedAccessToken=None,
+    )
     job = AutomationJob(
         id="job_preflight_fail",
         traceId="trace_1",
@@ -136,7 +230,7 @@ def test_worker_preflight_blocks_invalid_account_with_zero_retries():
 
     assert job.status == "FAILED"
     assert job.retryCount == 0  # 0 retries!
-    assert "External LinkedIn integration is not configured" in (job.errorMessage or "")
+    assert "LinkedIn account is not authorized for this operation." in (job.errorMessage or "")
 
 
 # ============================================================================
@@ -146,11 +240,14 @@ def test_worker_marks_account_session_invalid_on_401():
     processor = JobProcessor()
     db = MagicMock()
 
+    raw_token = "valid_oauth_access_token_partner"
     account = LinkedInAccount(
         id="acc_live_401",
         email="user@test.com",
-        status="ACTIVE",
-        cookies={"li_at": "AQED_TEST_VALID_LENGTH_TOKEN_1234567890123456789012345678901234567890"},
+        authStatus="CONNECTED",
+        encryptedAccessToken=encrypt_token(raw_token),
+        tokenExpiresAt=datetime.utcnow() + timedelta(days=10),
+        tokenScope="openid profile email r_messages w_messages",
     )
     job = AutomationJob(
         id="job_live_401",
@@ -176,7 +273,7 @@ def test_worker_marks_account_session_invalid_on_401():
 
     assert job.status == "FAILED"
     assert job.retryCount == 0  # Did not retry
-    assert account.status == "SESSION_INVALID"  # Updated account status natively
+    assert account.authStatus == "AUTHORIZATION_EXPIRED"  # Updated account status natively
     assert "401" in (job.errorMessage or "")
 
 
@@ -206,7 +303,10 @@ def test_send_message_flow_status_transition():
         id="acc_msg_test",
         email="msg@test.com",
         status="ACTIVE",
-        cookies={"li_at": "AQED_TEST_VALID_LENGTH_TOKEN_1234567890123456789012345678901234567890"},
+        authStatus="CONNECTED",
+        encryptedAccessToken=encrypt_token("oauth_test_token_123"),
+        tokenExpiresAt=datetime.utcnow() + timedelta(days=30),
+        tokenScope="openid profile email r_messages w_messages",
     )
     job = AutomationJob(
         id="job_send_msg",
@@ -247,7 +347,10 @@ def test_connection_request_flow():
         id="acc_conn_test",
         email="conn@test.com",
         status="ACTIVE",
-        cookies={"li_at": "AQED_TEST_VALID_LENGTH_TOKEN_1234567890123456789012345678901234567890"},
+        authStatus="CONNECTED",
+        encryptedAccessToken=encrypt_token("oauth_test_token_123"),
+        tokenExpiresAt=datetime.utcnow() + timedelta(days=30),
+        tokenScope="openid profile email r_messages w_messages",
     )
     job = AutomationJob(
         id="job_conn_test",
@@ -350,29 +453,20 @@ def test_circuit_breaker_trips_on_consecutive_5xx_errors():
 
 
 # ============================================================================
-# 15. test_health_endpoint_separates_infrastructure_from_integration
+# 15. test_api_accounts_zero_credential_exposure
 # ============================================================================
-def test_health_endpoint_separates_infrastructure_from_integration():
+def test_api_accounts_zero_credential_exposure():
+    """Verify GET /api/accounts returns status and scopes but NEVER raw or encrypted secrets."""
     client = TestClient(app)
-    response = client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
-
-    # Must have distinct infrastructure and externalIntegration objects
-    assert "infrastructure" in data
-    assert "externalIntegration" in data
-    assert "circuitBreaker" in data
-
-    infra = data["infrastructure"]
-    assert "database" in infra
-    assert "redis" in infra
-    assert "worker" in infra
-
-    ext = data["externalIntegration"]
-    assert ext["provider"] == "LinkedIn Voyager"
-    assert "authorizedAccounts" in ext
-    assert "sessionInvalidAccounts" in ext
-    assert "overallStatus" in ext
+    resp = client.get("/api/accounts")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    for acc in data:
+        assert "encryptedAccessToken" not in acc
+        assert "encryptedRefreshToken" not in acc
+        assert "cookies" not in acc
+        assert "authStatus" in acc
+        assert acc["authStatus"] in ("NOT_CONNECTED", "CONNECTED", "AUTHORIZATION_EXPIRED", "ERROR")
 
 
 # ============================================================================
@@ -381,7 +475,7 @@ def test_health_endpoint_separates_infrastructure_from_integration():
 def test_api_dispatch_rejects_unauthorized_account():
     client = TestClient(app)
 
-    # First, list accounts or use an invalid account ID
+    # 1. Non-existent account
     resp = client.post(
         "/api/jobs/dispatch",
         json={
@@ -390,13 +484,13 @@ def test_api_dispatch_rejects_unauthorized_account():
             "payload": {"recipientId": "satya", "content": "hello"},
         },
     )
-    # Should reject with 404 (or 400 if invalid)
     assert resp.status_code in (400, 404)
+    assert "LinkedIn account is not authorized for this operation." in resp.json()["detail"]
 
-    # Create account with invalid/missing cookie
+    # 2. Register account without OAuth connection (NOT_CONNECTED)
     save_resp = client.post(
         "/api/accounts",
-        json={"email": "test_unauth_dispatch@test.com", "cookies": {"li_at": "Short"}},
+        json={"email": f"test_unauth_{int(datetime.utcnow().timestamp())}@test.com"},
     )
     acc_id = save_resp.json()["data"]["id"]
 
@@ -409,4 +503,48 @@ def test_api_dispatch_rejects_unauthorized_account():
         },
     )
     assert dispatch_resp.status_code == 400
-    assert "not currently authorized for live operations" in dispatch_resp.json()["detail"]
+    assert "LinkedIn account is not authorized for this operation." in dispatch_resp.json()["detail"]
+
+
+# ============================================================================
+# 17. test_api_sync_rejects_unauthorized_account
+# ============================================================================
+def test_api_sync_rejects_unauthorized_account():
+    client = TestClient(app)
+    save_resp = client.post(
+        "/api/accounts",
+        json={"email": f"test_sync_unauth_{int(datetime.utcnow().timestamp())}@test.com"},
+    )
+    acc_id = save_resp.json()["data"]["id"]
+
+    sync_resp = client.post(
+        "/api/sync",
+        json={"accountId": acc_id, "limit": 10},
+    )
+    assert sync_resp.status_code == 400
+    assert "LinkedIn account is not authorized for this operation." in sync_resp.json()["detail"]
+
+
+# ============================================================================
+# 18. test_health_endpoint_separates_infrastructure_from_integration
+# ============================================================================
+def test_health_endpoint_separates_infrastructure_from_integration():
+    client = TestClient(app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "infrastructure" in data
+    assert "externalIntegration" in data
+    assert "circuitBreaker" in data
+
+    infra = data["infrastructure"]
+    assert "database" in infra
+    assert "redis" in infra
+    assert "worker" in infra
+
+    ext = data["externalIntegration"]
+    assert "OAuth" in ext["provider"]
+    assert "connectedAccounts" in ext
+    assert "expiredAccounts" in ext
+    assert "overallStatus" in ext

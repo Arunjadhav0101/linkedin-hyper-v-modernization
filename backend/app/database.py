@@ -46,14 +46,23 @@ def get_db_context():
 
 
 def init_db():
-    """Initializes tables and seeds default demo accounts if none exist."""
+    """Initializes tables, migrates schema for OAuth2 fields, and seeds defaults."""
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
             conn.execute(text('ALTER TYPE "AccountStatus" ADD VALUE IF NOT EXISTS \'SESSION_INVALID\';'))
+            # Add OAuth2 and encrypted token columns if they do not exist
+            conn.execute(text('ALTER TABLE "LinkedInAccount" ADD COLUMN IF NOT EXISTS "authType" VARCHAR DEFAULT \'OAUTH2\';'))
+            conn.execute(text('ALTER TABLE "LinkedInAccount" ADD COLUMN IF NOT EXISTS "authStatus" VARCHAR DEFAULT \'NOT_CONNECTED\';'))
+            conn.execute(text('ALTER TABLE "LinkedInAccount" ADD COLUMN IF NOT EXISTS "encryptedAccessToken" TEXT;'))
+            conn.execute(text('ALTER TABLE "LinkedInAccount" ADD COLUMN IF NOT EXISTS "encryptedRefreshToken" TEXT;'))
+            conn.execute(text('ALTER TABLE "LinkedInAccount" ADD COLUMN IF NOT EXISTS "tokenExpiresAt" TIMESTAMP;'))
+            conn.execute(text('ALTER TABLE "LinkedInAccount" ADD COLUMN IF NOT EXISTS "tokenScope" VARCHAR;'))
+            conn.execute(text('ALTER TABLE "LinkedInAccount" ADD COLUMN IF NOT EXISTS "avatarUrl" VARCHAR;'))
+            conn.execute(text('ALTER TABLE "LinkedInAccount" ADD COLUMN IF NOT EXISTS "oauthState" VARCHAR;'))
             conn.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Schema migration note: {e}")
 
     Base.metadata.create_all(bind=engine)
     with get_db_context() as db:

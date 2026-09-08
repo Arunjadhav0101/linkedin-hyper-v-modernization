@@ -50,3 +50,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.encryption_key
+backend/.encryption_key
+.chrome_session/
